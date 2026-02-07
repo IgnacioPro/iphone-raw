@@ -26,6 +26,7 @@ struct PhotodewIOSApp: SwiftUI.App {
 enum SaveToastState: Equatable {
     case saving
     case saved
+    case cleaned
 
     var message: String {
         switch self {
@@ -33,6 +34,8 @@ enum SaveToastState: Equatable {
             return "Saving to Photos..."
         case .saved:
             return "Saved to Photos."
+        case .cleaned:
+            return "Deleted last capture from Photos."
         }
     }
 }
@@ -41,11 +44,25 @@ enum SaveToastState: Equatable {
 final class BootstrapViewModel: ObservableObject {
     @Published private(set) var state: AppBootState = .idle
     @Published private(set) var isCapturingPhoto = false
+    @Published private(set) var isRecoveringSession = false
     @Published private(set) var lastCaptureByteCount: Int?
     @Published private(set) var lastCaptureAt: Date?
     @Published private(set) var lastCaptureError: String?
     @Published private(set) var saveToast: SaveToastState?
     @Published private(set) var isRawCaptureEnabled = false
+    @Published private(set) var storagePressureWarning: String?
+    @Published private(set) var isCleaningRecentCapture = false
+    @Published private(set) var exposureState: ExposureControlState = .auto
+    @Published private(set) var exposureCompensation: Double = 0
+    @Published private(set) var exposureCompensationRange: ClosedRange<Double> = -2...2
+    @Published private(set) var focusState: FocusControlState = .auto
+    @Published private(set) var whiteBalanceState: WhiteBalanceControlState = .auto
+    @Published var selectedExposureISO: Double = 100
+    @Published var selectedExposureShutterSeconds: Double = 1.0 / 125.0
+    @Published var selectedExposureCompensation: Double = 0
+    @Published var selectedFocusLensPosition: Double = 0.5
+    @Published var selectedWhiteBalanceTemperatureKelvin: Double = 5_000
+    @Published var selectedWhiteBalanceTint: Double = 0
     @Published private(set) var rawCaptureCapability = RawCaptureCapability(
         isSupported: false,
         availableRawPhotoPixelFormatTypes: [],
@@ -54,15 +71,38 @@ final class BootstrapViewModel: ObservableObject {
 
     private let model: CaptureAppModel
     private let cameraRollSaver: CameraRollSaving
+    private let storageMonitor: StorageMonitoring
     private var activeCaptureID: UUID?
+    private var lastSavedLocalIdentifiers: [String] = []
     private var dismissSaveToastTask: Task<Void, Never>?
+    #if canImport(AVFoundation)
+    private var sessionNotificationObservers: [NSObjectProtocol] = []
+    private weak var observedCaptureSession: AVCaptureSession?
+    #endif
+    private static let lowStorageThresholdBytes: Int64 = 5_000_000_000
+    static let manualISOOptions: [Double] = [25, 50, 64, 80, 100, 125, 160, 200, 320, 400, 640, 800, 1_250]
+    static let manualShutterOptions: [Double] = [
+        1.0 / 1_000.0,
+        1.0 / 500.0,
+        1.0 / 250.0,
+        1.0 / 120.0,
+        1.0 / 125.0,
+        1.0 / 60.0,
+        1.0 / 30.0,
+        1.0 / 15.0,
+        1.0 / 8.0,
+    ]
+    static let manualWhiteBalanceTemperatureRange: ClosedRange<Double> = 2_000...10_000
+    static let manualWhiteBalanceTintRange: ClosedRange<Double> = -150...150
 
     init(
         model: CaptureAppModel = AppCompositionRoot().makeAppModel(),
-        cameraRollSaver: CameraRollSaving = SystemCameraRollSaver()
+        cameraRollSaver: CameraRollSaving = SystemCameraRollSaver(),
+        storageMonitor: StorageMonitoring = DeviceStorageMonitor()
     ) {
         self.model = model
         self.cameraRollSaver = cameraRollSaver
+        self.storageMonitor = storageMonitor
     }
 
     func start() async {
@@ -78,6 +118,12 @@ final class BootstrapViewModel: ObservableObject {
         await model.bootstrap()
         state = model.bootState
         refreshRawCaptureCapability()
+        refreshExposureState()
+        refreshExposureCompensation()
+        refreshFocusState()
+        refreshWhiteBalanceState()
+        refreshStoragePressureWarning()
+        configureSessionObserversIfNeeded()
         #endif
     }
 
@@ -88,12 +134,28 @@ final class BootstrapViewModel: ObservableObject {
             availableRawPhotoPixelFormatTypes: [],
             reason: "RAW capability is unavailable until the camera session is running."
         )
+        exposureState = .auto
+        exposureCompensation = 0
+        exposureCompensationRange = -2...2
+        selectedExposureCompensation = 0
+        focusState = .auto
+        whiteBalanceState = .auto
+        selectedWhiteBalanceTemperatureKelvin = 5_000
+        selectedWhiteBalanceTint = 0
+        storagePressureWarning = nil
+        removeSessionObservers()
     }
 
     func resumeSessionIfNeeded() {
         model.resumeSessionIfNeeded()
         state = model.bootState
         refreshRawCaptureCapability()
+        refreshExposureState()
+        refreshExposureCompensation()
+        refreshFocusState()
+        refreshWhiteBalanceState()
+        refreshStoragePressureWarning()
+        configureSessionObserversIfNeeded()
     }
 
     func capturePhoto() async {
@@ -121,6 +183,9 @@ final class BootstrapViewModel: ObservableObject {
             let capturedAt = Date()
             let primaryByteCount = try capturePayload.primaryData(for: captureFormat).count
             let pairedByteCount = capturePayload.secondaryData(for: captureFormat)?.count
+            let primaryCaptureMetadata = capturePayload.primaryMetadata(for: captureFormat)
+            let pairedCaptureMetadata = capturePayload.secondaryMetadata(for: captureFormat)
+            lastSavedLocalIdentifiers = saveResult.localIdentifiers
             lastCaptureByteCount = capturePayload.totalByteCount
             lastCaptureAt = capturedAt
             lastCaptureError = nil
@@ -131,8 +196,11 @@ final class BootstrapViewModel: ObservableObject {
                 byteCount: primaryByteCount,
                 captureFormat: captureFormat,
                 pairedLocalIdentifier: saveResult.pairedLocalIdentifier,
-                pairedByteCount: pairedByteCount
+                pairedByteCount: pairedByteCount,
+                captureMetadata: primaryCaptureMetadata,
+                pairedCaptureMetadata: pairedCaptureMetadata
             )
+            refreshStoragePressureWarning()
             setSaveToast(.saved)
             scheduleSaveToastDismiss()
             activeCaptureID = nil
@@ -144,11 +212,44 @@ final class BootstrapViewModel: ObservableObject {
             lastCaptureError = captureErrorMessage(from: error)
             setSaveToast(nil)
             if error is CaptureSessionError {
+                lastCaptureError = "\(captureErrorMessage(from: error)) Recovering camera session."
                 Task { [weak self] in
-                    await self?.recoverSessionAfterCaptureFailure()
+                    await self?.recoverSession(trigger: "capture_error")
                 }
             }
         }
+    }
+
+    var canCleanupRecentCapture: Bool {
+        !lastSavedLocalIdentifiers.isEmpty
+    }
+
+    func cleanupRecentCapture() async {
+        guard case .ready = state else { return }
+        guard !isCleaningRecentCapture else { return }
+        let localIdentifiers = lastSavedLocalIdentifiers
+        guard !localIdentifiers.isEmpty else { return }
+
+        isCleaningRecentCapture = true
+        defer { isCleaningRecentCapture = false }
+
+        do {
+            let deletedCount = try await cameraRollSaver.deleteAssets(localIdentifiers: localIdentifiers)
+            guard deletedCount > 0 else { return }
+            await model.removePhotoLibraryCaptures(localIdentifiers: localIdentifiers)
+            lastSavedLocalIdentifiers = []
+            lastCaptureError = nil
+            refreshStoragePressureWarning()
+            setSaveToast(.cleaned)
+            scheduleSaveToastDismiss()
+        } catch {
+            lastCaptureError = captureErrorMessage(from: error)
+        }
+    }
+
+    func retrySessionRecovery() async {
+        lastCaptureError = "Retrying camera session..."
+        await recoverSession(trigger: "manual_retry")
     }
 
     func switchCamera() {
@@ -157,6 +258,10 @@ final class BootstrapViewModel: ObservableObject {
             try model.switchCamera()
             lastCaptureError = nil
             refreshRawCaptureCapability()
+            refreshExposureState()
+            refreshExposureCompensation()
+            refreshFocusState()
+            refreshWhiteBalanceState()
         } catch {
             lastCaptureError = String(describing: error)
         }
@@ -174,17 +279,132 @@ final class BootstrapViewModel: ObservableObject {
         lastCaptureError = nil
     }
 
+    func applyExposureAuto() {
+        guard case .ready = state else { return }
+        do {
+            try model.setExposureAuto()
+            refreshExposureState()
+            lastCaptureError = nil
+        } catch {
+            lastCaptureError = captureErrorMessage(from: error)
+        }
+    }
+
+    func applyCustomExposureSelection() {
+        guard case .ready = state else { return }
+        do {
+            try model.setCustomExposure(
+                iso: selectedExposureISO,
+                shutterSeconds: selectedExposureShutterSeconds
+            )
+            refreshExposureState()
+            lastCaptureError = nil
+        } catch {
+            lastCaptureError = captureErrorMessage(from: error)
+        }
+    }
+
+    func applyExposureCompensationSelection() {
+        guard case .ready = state else { return }
+        do {
+            try model.setExposureCompensation(selectedExposureCompensation)
+            refreshExposureCompensation()
+            lastCaptureError = nil
+        } catch {
+            lastCaptureError = captureErrorMessage(from: error)
+        }
+    }
+
+    func resetExposureCompensation() {
+        guard case .ready = state else { return }
+        do {
+            try model.resetExposureCompensation()
+            refreshExposureCompensation()
+            lastCaptureError = nil
+        } catch {
+            lastCaptureError = captureErrorMessage(from: error)
+        }
+    }
+
+    func applyFocusAuto() {
+        guard case .ready = state else { return }
+        do {
+            try model.setFocusAuto()
+            refreshFocusState()
+            lastCaptureError = nil
+        } catch {
+            lastCaptureError = captureErrorMessage(from: error)
+        }
+    }
+
+    func applyFocusLockSelection() {
+        guard case .ready = state else { return }
+        do {
+            try model.lockFocus(lensPosition: selectedFocusLensPosition)
+            refreshFocusState()
+            lastCaptureError = nil
+        } catch {
+            lastCaptureError = captureErrorMessage(from: error)
+        }
+    }
+
+    func applyWhiteBalanceAuto() {
+        guard case .ready = state else { return }
+        do {
+            try model.setWhiteBalanceAuto()
+            refreshWhiteBalanceState()
+            lastCaptureError = nil
+        } catch {
+            lastCaptureError = captureErrorMessage(from: error)
+        }
+    }
+
+    func applyWhiteBalanceLockSelection() {
+        guard case .ready = state else { return }
+        do {
+            try model.lockWhiteBalance(
+                temperatureKelvin: selectedWhiteBalanceTemperatureKelvin,
+                tint: selectedWhiteBalanceTint
+            )
+            refreshWhiteBalanceState()
+            lastCaptureError = nil
+        } catch {
+            lastCaptureError = captureErrorMessage(from: error)
+        }
+    }
+
     #if canImport(AVFoundation)
     var previewSession: AVCaptureSession? {
         model.previewSession
     }
     #endif
 
-    private func recoverSessionAfterCaptureFailure() async {
+    private func recoverSession(trigger: String) async {
+        guard !isRecoveringSession else { return }
+        isRecoveringSession = true
+        defer { isRecoveringSession = false }
+
         model.stopSession()
         await model.bootstrap()
         state = model.bootState
         refreshRawCaptureCapability()
+        refreshExposureState()
+        refreshExposureCompensation()
+        refreshFocusState()
+        refreshWhiteBalanceState()
+        refreshStoragePressureWarning()
+        configureSessionObserversIfNeeded()
+
+        if case .ready = state {
+            if trigger == "manual_retry" || trigger == "session_runtime_error" || trigger == "session_interruption_ended" {
+                lastCaptureError = nil
+            }
+            return
+        }
+
+        if trigger == "manual_retry" {
+            lastCaptureError = "Camera recovery failed. Close and relaunch if the issue persists."
+        }
     }
 
     private func startCaptureWatchdog(for captureID: UUID) {
@@ -195,13 +415,26 @@ final class BootstrapViewModel: ObservableObject {
 
             self.activeCaptureID = nil
             self.isCapturingPhoto = false
-            self.lastCaptureError = "Capture timed out. Restarting camera session."
+            self.lastCaptureError = "Capture timed out. Recovering camera session."
             self.setSaveToast(nil)
-            await self.recoverSessionAfterCaptureFailure()
+            await self.recoverSession(trigger: "capture_watchdog_timeout")
         }
     }
 
     private func captureErrorMessage(from error: Error) -> String {
+        if let captureError = error as? CaptureSessionError {
+            switch captureError {
+            case .captureTimedOut:
+                return "Camera capture timed out."
+            case .backendFailure:
+                break
+            case .cameraSwitchNotSupported:
+                return "Camera switch is not available on this device."
+            case .rawCaptureNotSupported:
+                return "RAW capture is not available for the current camera configuration."
+            }
+        }
+
         if let localizedError = error as? LocalizedError,
            let description = localizedError.errorDescription {
             return description
@@ -243,18 +476,262 @@ final class BootstrapViewModel: ObservableObject {
             isRawCaptureEnabled = false
         }
     }
+
+    private func refreshExposureState() {
+        guard case .ready = state else {
+            exposureState = .auto
+            selectedExposureISO = Self.nearestOption(to: 100, in: Self.manualISOOptions) ?? selectedExposureISO
+            selectedExposureShutterSeconds = Self.nearestOption(
+                to: 1.0 / 125.0,
+                in: Self.manualShutterOptions
+            ) ?? selectedExposureShutterSeconds
+            return
+        }
+
+        let currentExposureState = model.exposureState()
+        exposureState = currentExposureState
+        if let values = currentExposureState.values {
+            selectedExposureISO = Self.nearestOption(to: values.iso, in: Self.manualISOOptions) ?? values.iso
+            selectedExposureShutterSeconds = Self.nearestOption(
+                to: values.shutterSeconds,
+                in: Self.manualShutterOptions
+            ) ?? values.shutterSeconds
+        }
+    }
+
+    private func refreshExposureCompensation() {
+        guard case .ready = state else {
+            exposureCompensation = 0
+            exposureCompensationRange = -2...2
+            selectedExposureCompensation = 0
+            return
+        }
+
+        exposureCompensationRange = model.exposureCompensationRange()
+        let currentValue = model.exposureCompensation()
+        exposureCompensation = currentValue
+        selectedExposureCompensation = min(
+            max(currentValue, exposureCompensationRange.lowerBound),
+            exposureCompensationRange.upperBound
+        )
+    }
+
+    private static func nearestOption(to value: Double, in options: [Double]) -> Double? {
+        guard !options.isEmpty else { return nil }
+        return options.min { lhs, rhs in
+            abs(lhs - value) < abs(rhs - value)
+        }
+    }
+
+    private func refreshFocusState() {
+        guard case .ready = state else {
+            focusState = .auto
+            selectedFocusLensPosition = 0.5
+            return
+        }
+        let currentFocusState = model.focusState()
+        focusState = currentFocusState
+        if let lensPosition = currentFocusState.lensPosition {
+            selectedFocusLensPosition = min(max(lensPosition, 0), 1)
+        }
+    }
+
+    private func refreshWhiteBalanceState() {
+        guard case .ready = state else {
+            whiteBalanceState = .auto
+            selectedWhiteBalanceTemperatureKelvin = 5_000
+            selectedWhiteBalanceTint = 0
+            return
+        }
+
+        let currentWhiteBalanceState = model.whiteBalanceState()
+        whiteBalanceState = currentWhiteBalanceState
+        if let values = currentWhiteBalanceState.values {
+            selectedWhiteBalanceTemperatureKelvin = min(
+                max(values.temperatureKelvin, Self.manualWhiteBalanceTemperatureRange.lowerBound),
+                Self.manualWhiteBalanceTemperatureRange.upperBound
+            )
+            selectedWhiteBalanceTint = min(
+                max(values.tint, Self.manualWhiteBalanceTintRange.lowerBound),
+                Self.manualWhiteBalanceTintRange.upperBound
+            )
+        }
+    }
+
+    private func refreshStoragePressureWarning() {
+        guard case .ready = state else {
+            storagePressureWarning = nil
+            return
+        }
+
+        guard let availableBytes = storageMonitor.currentAvailableCapacityForImportantUsage() else {
+            storagePressureWarning = nil
+            return
+        }
+
+        if availableBytes <= Self.lowStorageThresholdBytes {
+            let availableText = ByteCountFormatter.string(fromByteCount: availableBytes, countStyle: .file)
+            storagePressureWarning = "Low storage: \(availableText) available. RAW captures may fail. Clean recent captures if needed."
+            return
+        }
+
+        storagePressureWarning = nil
+    }
+
+    #if canImport(AVFoundation)
+    private func configureSessionObserversIfNeeded() {
+        guard case .ready = state else {
+            removeSessionObservers()
+            return
+        }
+        guard let captureSession = model.previewSession else {
+            removeSessionObservers()
+            return
+        }
+        if observedCaptureSession === captureSession, !sessionNotificationObservers.isEmpty {
+            return
+        }
+
+        removeSessionObservers()
+        observedCaptureSession = captureSession
+
+        let notificationCenter = NotificationCenter.default
+        let interruptedObserver = notificationCenter.addObserver(
+            forName: AVCaptureSession.wasInterruptedNotification,
+            object: captureSession,
+            queue: .main
+        ) { [weak self] notification in
+            let reasonDescription = sessionInterruptionReasonDescription(from: notification.userInfo)
+            Task { @MainActor [weak self] in
+                self?.handleSessionInterrupted(reasonDescription: reasonDescription)
+            }
+        }
+        let interruptionEndedObserver = notificationCenter.addObserver(
+            forName: AVCaptureSession.interruptionEndedNotification,
+            object: captureSession,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                self?.handleSessionInterruptionEnded()
+            }
+        }
+        let runtimeErrorObserver = notificationCenter.addObserver(
+            forName: AVCaptureSession.runtimeErrorNotification,
+            object: captureSession,
+            queue: .main
+        ) { [weak self] notification in
+            let reasonDescription = sessionRuntimeErrorDescription(from: notification.userInfo)
+            Task { @MainActor [weak self] in
+                self?.handleSessionRuntimeError(reasonDescription: reasonDescription)
+            }
+        }
+
+        sessionNotificationObservers = [
+            interruptedObserver,
+            interruptionEndedObserver,
+            runtimeErrorObserver,
+        ]
+    }
+
+    private func removeSessionObservers() {
+        let notificationCenter = NotificationCenter.default
+        for observer in sessionNotificationObservers {
+            notificationCenter.removeObserver(observer)
+        }
+        sessionNotificationObservers = []
+        observedCaptureSession = nil
+    }
+
+    private func handleSessionInterrupted(reasonDescription: String) {
+        model.markSessionInterrupted(reason: reasonDescription)
+        lastCaptureError = "Camera interrupted (\(reasonDescription)). Waiting for recovery..."
+    }
+
+    private func handleSessionInterruptionEnded() {
+        Task { [weak self] in
+            await self?.recoverSession(trigger: "session_interruption_ended")
+        }
+    }
+
+    private func handleSessionRuntimeError(reasonDescription: String) {
+        lastCaptureError = "Camera session error (\(reasonDescription)). Recovering..."
+        Task { [weak self] in
+            await self?.recoverSession(trigger: "session_runtime_error")
+        }
+    }
+
+    #endif
 }
+
+#if canImport(AVFoundation)
+private func sessionInterruptionReasonDescription(from userInfo: [AnyHashable: Any]?) -> String {
+    guard let userInfo,
+          let reasonValue = userInfo[AVCaptureSessionInterruptionReasonKey] as? NSNumber,
+          let reason = AVCaptureSession.InterruptionReason(rawValue: reasonValue.intValue) else {
+        return "unknown interruption"
+    }
+
+    switch reason {
+    case .audioDeviceInUseByAnotherClient:
+        return "audio in use by another app"
+    case .videoDeviceInUseByAnotherClient:
+        return "camera in use by another app"
+    case .videoDeviceNotAvailableInBackground:
+        return "camera unavailable in background"
+    case .videoDeviceNotAvailableWithMultipleForegroundApps:
+        return "camera unavailable with multiple foreground apps"
+    case .videoDeviceNotAvailableDueToSystemPressure:
+        return "camera unavailable due to system pressure"
+    case .sensitiveContentMitigationActivated:
+        return "camera unavailable due to sensitive content mitigation"
+    @unknown default:
+        return "unrecognized interruption"
+    }
+}
+
+private func sessionRuntimeErrorDescription(from userInfo: [AnyHashable: Any]?) -> String {
+    if let userInfo,
+       let error = userInfo[AVCaptureSessionErrorKey] as? NSError {
+        return error.localizedDescription
+    }
+    return "unknown runtime error"
+}
+#endif
 
 protocol CameraRollSaving: Sendable {
     func saveCapturePayload(
         _ payload: CapturedPhotoPayload,
         requestedFormat: CapturePhotoFormat
     ) async throws -> CameraRollSaveResult
+    func deleteAssets(localIdentifiers: [String]) async throws -> Int
 }
 
 struct CameraRollSaveResult: Sendable, Equatable {
     let primaryLocalIdentifier: String
     let pairedLocalIdentifier: String?
+
+    var localIdentifiers: [String] {
+        var identifiers = [primaryLocalIdentifier]
+        if let pairedLocalIdentifier {
+            identifiers.append(pairedLocalIdentifier)
+        }
+        return identifiers
+    }
+}
+
+protocol StorageMonitoring: Sendable {
+    func currentAvailableCapacityForImportantUsage() -> Int64?
+}
+
+struct DeviceStorageMonitor: StorageMonitoring {
+    func currentAvailableCapacityForImportantUsage() -> Int64? {
+        let homeURL = URL(fileURLWithPath: NSHomeDirectory(), isDirectory: true)
+        let keys: Set<URLResourceKey> = [.volumeAvailableCapacityForImportantUsageKey]
+        guard let values = try? homeURL.resourceValues(forKeys: keys) else {
+            return nil
+        }
+        return values.volumeAvailableCapacityForImportantUsage
+    }
 }
 
 #if canImport(Photos)
@@ -383,6 +860,49 @@ private struct SystemCameraRollSaver: CameraRollSaving {
         return await PHPhotoLibrary.requestAuthorization(for: .addOnly)
     }
 
+    func deleteAssets(localIdentifiers: [String]) async throws -> Int {
+        let uniqueIdentifiers = Array(Set(localIdentifiers))
+        guard !uniqueIdentifiers.isEmpty else { return 0 }
+
+        let status = await cleanupAuthorizationStatus()
+        switch status {
+        case .authorized, .limited:
+            break
+        case .restricted:
+            throw CameraRollSaveError.cleanupAccessRestricted
+        case .denied, .notDetermined:
+            throw CameraRollSaveError.cleanupAccessDenied
+        @unknown default:
+            throw CameraRollSaveError.cleanupAccessDenied
+        }
+
+        let fetchResult = PHAsset.fetchAssets(withLocalIdentifiers: uniqueIdentifiers, options: nil)
+        guard fetchResult.count > 0 else {
+            return 0
+        }
+
+        var assets: [PHAsset] = []
+        fetchResult.enumerateObjects { asset, _, _ in
+            assets.append(asset)
+        }
+
+        do {
+            try await PHPhotoLibrary.shared().performChanges {
+                PHAssetChangeRequest.deleteAssets(assets as NSArray)
+            }
+        } catch {
+            throw CameraRollSaveError.cleanupFailed
+        }
+
+        return assets.count
+    }
+
+    private func cleanupAuthorizationStatus() async -> PHAuthorizationStatus {
+        let currentStatus = PHPhotoLibrary.authorizationStatus(for: .readWrite)
+        guard currentStatus == .notDetermined else { return currentStatus }
+        return await PHPhotoLibrary.requestAuthorization(for: .readWrite)
+    }
+
     private static let filenameTimestampFormatter: DateFormatter = {
         let formatter = DateFormatter()
         formatter.dateFormat = "yyyyMMdd-HHmmss"
@@ -399,6 +919,10 @@ private struct SystemCameraRollSaver: CameraRollSaving {
     ) async throws -> CameraRollSaveResult {
         throw CameraRollSaveError.unavailable
     }
+
+    func deleteAssets(localIdentifiers: [String]) async throws -> Int {
+        throw CameraRollSaveError.unavailable
+    }
 }
 #endif
 
@@ -407,6 +931,9 @@ private enum CameraRollSaveError: LocalizedError {
     case accessRestricted
     case saveFailed
     case missingCaptureData
+    case cleanupAccessDenied
+    case cleanupAccessRestricted
+    case cleanupFailed
     case unavailable
 
     var errorDescription: String? {
@@ -419,6 +946,12 @@ private enum CameraRollSaveError: LocalizedError {
             "Could not save the photo to Photos."
         case .missingCaptureData:
             "Capture data was incomplete. Try capturing again."
+        case .cleanupAccessDenied:
+            "Photos cleanup requires read-write Photos permission. Enable it in Settings."
+        case .cleanupAccessRestricted:
+            "Photos cleanup is restricted by system policy."
+        case .cleanupFailed:
+            "Could not delete saved photos during cleanup."
         case .unavailable:
             "Saving to Photos is unavailable on this device."
         }

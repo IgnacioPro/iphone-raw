@@ -61,18 +61,55 @@ struct CaptureSessionServiceTests {
         let data = try await service.capturePhoto()
 
         #expect(data == Data([0x01, 0x02, 0x03]))
+        #expect(logger.events.contains(where: { $0.action == "photo_capture_started" }))
         #expect(logger.events.contains(where: { $0.action == "photo_capture_succeeded" }))
+        guard let startedEvent = logger.events.first(where: { $0.action == "photo_capture_started" }),
+              let successEvent = logger.events.first(where: { $0.action == "photo_capture_succeeded" }) else {
+            Issue.record("Expected start and success capture telemetry events.")
+            return
+        }
+
+        #expect(startedEvent.payload["format"] == "processed")
+        #expect(successEvent.payload["format"] == "processed")
+        #expect(successEvent.payload["capture_id"] == startedEvent.payload["capture_id"])
+        #expect(successEvent.payload["bytes"] == "3")
+        #expect(successEvent.payload["total_bytes"] == "3")
+        guard let latencyValue = successEvent.payload["capture_latency_ms"],
+              let latencyMilliseconds = Int(latencyValue) else {
+            Issue.record("Expected capture_latency_ms in success telemetry payload.")
+            return
+        }
+        #expect(latencyMilliseconds >= 0)
     }
 
     @Test("raw capture exposes RAW and processed pair payload")
     func rawCapturePayload() async throws {
+        let processedMetadata = CaptureTechnicalMetadata(
+            lensModel: "Back Wide Camera",
+            iso: 80,
+            shutterSeconds: 0.02,
+            whiteBalanceMode: "auto",
+            whiteBalanceTemperatureKelvin: 4_800,
+            whiteBalanceTint: 1
+        )
+        let rawMetadata = CaptureTechnicalMetadata(
+            lensModel: "Back Wide Camera",
+            iso: 64,
+            shutterSeconds: 0.016_666,
+            whiteBalanceMode: "manual",
+            whiteBalanceTemperatureKelvin: 5_000,
+            whiteBalanceTint: -4
+        )
         let backend = StubCaptureBackend(
             capturePayload: CapturedPhotoPayload(
                 processedData: Data([0x10, 0x20]),
-                rawData: Data([0xAA, 0xBB, 0xCC])
+                rawData: Data([0xAA, 0xBB, 0xCC]),
+                processedMetadata: processedMetadata,
+                rawMetadata: rawMetadata
             )
         )
-        let service = CaptureSessionService(backend: backend)
+        let logger = InMemoryCaptureEventLogger()
+        let service = CaptureSessionService(backend: backend, logger: logger)
         try service.start()
 
         let payload = try await service.capturePhotoPayload(format: .raw)
@@ -81,6 +118,18 @@ struct CaptureSessionServiceTests {
         #expect(payload.rawData == Data([0xAA, 0xBB, 0xCC]))
         #expect(payload.processedData == Data([0x10, 0x20]))
         #expect(primaryData == Data([0xAA, 0xBB, 0xCC]))
+        #expect(payload.primaryMetadata(for: .raw) == rawMetadata)
+        #expect(payload.secondaryMetadata(for: .raw) == processedMetadata)
+        #expect(payload.primaryMetadata(for: .processed) == processedMetadata)
+        #expect(payload.secondaryMetadata(for: .processed) == rawMetadata)
+        guard let successEvent = logger.events.last(where: { $0.action == "photo_capture_succeeded" }) else {
+            Issue.record("Expected raw capture success telemetry event.")
+            return
+        }
+        #expect(successEvent.payload["format"] == "raw")
+        #expect(successEvent.payload["bytes"] == "3")
+        #expect(successEvent.payload["paired_bytes"] == "2")
+        #expect(successEvent.payload["total_bytes"] == "5")
     }
 
     @Test("capturePhoto logs failure when backend throws")
@@ -94,7 +143,23 @@ struct CaptureSessionServiceTests {
             _ = try await service.capturePhoto()
         }
 
+        #expect(logger.events.contains(where: { $0.action == "photo_capture_started" }))
         #expect(logger.events.contains(where: { $0.action == "photo_capture_failed" }))
+        guard let startedEvent = logger.events.first(where: { $0.action == "photo_capture_started" }),
+              let failedEvent = logger.events.first(where: { $0.action == "photo_capture_failed" }) else {
+            Issue.record("Expected start and failure capture telemetry events.")
+            return
+        }
+
+        #expect(failedEvent.payload["format"] == "processed")
+        #expect(failedEvent.payload["capture_id"] == startedEvent.payload["capture_id"])
+        #expect(failedEvent.payload["error"]?.contains("capture failed") == true)
+        guard let latencyValue = failedEvent.payload["capture_latency_ms"],
+              let latencyMilliseconds = Int(latencyValue) else {
+            Issue.record("Expected capture_latency_ms in failure telemetry payload.")
+            return
+        }
+        #expect(latencyMilliseconds >= 0)
     }
 
     @Test("rawCaptureCapability returns backend reported capability")
@@ -108,6 +173,304 @@ struct CaptureSessionServiceTests {
 
         #expect(service.rawCaptureCapability() == expected)
     }
+
+    @Test("markInterrupted updates state and emits interruption event")
+    func markInterrupted() throws {
+        let backend = StubCaptureBackend()
+        let logger = InMemoryCaptureEventLogger()
+        let service = CaptureSessionService(backend: backend, logger: logger)
+        try service.start()
+
+        service.markInterrupted(reason: "videoDeviceNotAvailableInBackground")
+
+        #expect(service.state == .interrupted(reason: "videoDeviceNotAvailableInBackground"))
+        guard let interruptionEvent = logger.events.last(where: { $0.action == "session_interrupted" }) else {
+            Issue.record("Expected session_interrupted event.")
+            return
+        }
+        #expect(interruptionEvent.payload["reason"] == "videoDeviceNotAvailableInBackground")
+    }
+
+    @Test("exposure state transitions auto locked custom")
+    func exposureStateTransitions() throws {
+        let backend = StubCaptureBackend()
+        let logger = InMemoryCaptureEventLogger()
+        let service = CaptureSessionService(backend: backend, logger: logger)
+
+        #expect(service.exposureState == .auto)
+
+        try service.lockExposure(iso: 64, shutterSeconds: 1.0 / 120.0)
+        #expect(
+            service.exposureState ==
+            .locked(
+                ExposureValues(
+                    iso: 64,
+                    shutterSeconds: 1.0 / 120.0
+                )
+            )
+        )
+
+        try service.setCustomExposure(iso: 200, shutterSeconds: 1.0 / 50.0)
+        #expect(
+            service.exposureState ==
+            .custom(
+                ExposureValues(
+                    iso: 200,
+                    shutterSeconds: 1.0 / 50.0
+                )
+            )
+        )
+
+        try service.setExposureAuto()
+        #expect(service.exposureState == .auto)
+
+        let exposureEvents = logger.events.filter { $0.action == "exposure_mode_changed" }
+        #expect(exposureEvents.count == 3)
+        #expect(exposureEvents[0].payload["mode"] == "locked")
+        #expect(exposureEvents[1].payload["mode"] == "custom")
+        #expect(exposureEvents[2].payload["mode"] == "auto")
+    }
+
+    @Test("invalid exposure values throw and preserve prior state")
+    func invalidExposureValues() throws {
+        let backend = StubCaptureBackend()
+        let service = CaptureSessionService(backend: backend)
+
+        try service.setCustomExposure(iso: 100, shutterSeconds: 1.0 / 100.0)
+        let previousState = service.exposureState
+
+        #expect(throws: ExposureStateMachineError.self) {
+            try service.lockExposure(iso: 0, shutterSeconds: 0.01)
+        }
+
+        #expect(service.exposureState == previousState)
+    }
+
+    @Test("backend exposure apply failure preserves previous state")
+    func backendExposureApplyFailure() throws {
+        let backend = StubCaptureBackend(shouldFailExposureApply: true)
+        let service = CaptureSessionService(backend: backend)
+
+        #expect(service.exposureState == .auto)
+        #expect(throws: CaptureSessionError.self) {
+            try service.setCustomExposure(iso: 200, shutterSeconds: 1.0 / 100.0)
+        }
+        #expect(service.exposureState == .auto)
+    }
+
+    @Test("capture metadata reflects selected ISO and shutter values")
+    func captureMetadataReflectsManualExposureValues() async throws {
+        let backend = StubCaptureBackend()
+        let service = CaptureSessionService(backend: backend)
+        try service.start()
+
+        try service.setCustomExposure(iso: 320, shutterSeconds: 1.0 / 30.0)
+        let payload = try await service.capturePhotoPayload(format: .processed)
+        guard let metadata = payload.primaryMetadata(for: .processed) else {
+            Issue.record("Expected capture metadata for processed payload.")
+            return
+        }
+
+        #expect(metadata.iso == 320)
+        #expect(metadata.shutterSeconds == 1.0 / 30.0)
+    }
+
+    @Test("exposure compensation apply and reset")
+    func exposureCompensationApplyAndReset() throws {
+        let backend = StubCaptureBackend()
+        let logger = InMemoryCaptureEventLogger()
+        let service = CaptureSessionService(backend: backend, logger: logger)
+
+        #expect(service.exposureCompensation == 0)
+
+        try service.setExposureCompensation(1.2)
+        #expect(service.exposureCompensation == 1.2)
+
+        try service.resetExposureCompensation()
+        #expect(service.exposureCompensation == 0)
+
+        let events = logger.events.filter { $0.action == "exposure_compensation_changed" }
+        #expect(events.count == 2)
+        #expect(events[0].payload["ev"] == "1.2")
+        #expect(events[1].payload["ev"] == "0.0")
+    }
+
+    @Test("exposure compensation apply failure preserves previous value")
+    func exposureCompensationApplyFailurePreservesValue() throws {
+        let backend = StubCaptureBackend(shouldFailExposureCompensationApply: true)
+        let service = CaptureSessionService(backend: backend)
+
+        #expect(service.exposureCompensation == 0)
+        #expect(throws: CaptureSessionError.self) {
+            try service.setExposureCompensation(0.8)
+        }
+        #expect(service.exposureCompensation == 0)
+    }
+
+    @Test("exposure compensation persists across camera switch")
+    func exposureCompensationPersistsAcrossCameraSwitch() throws {
+        let backend = StubCaptureBackend()
+        let service = CaptureSessionService(backend: backend)
+        try service.start()
+
+        try service.setExposureCompensation(-0.7)
+        try service.switchCamera()
+
+        #expect(service.exposureCompensation == -0.7)
+    }
+
+    @Test("focus state transitions lock auto")
+    func focusStateTransitions() throws {
+        let backend = StubCaptureBackend()
+        let logger = InMemoryCaptureEventLogger()
+        let service = CaptureSessionService(backend: backend, logger: logger)
+
+        #expect(service.focusState == .auto)
+
+        try service.lockFocus(lensPosition: 0.72)
+        #expect(service.focusState == .locked(lensPosition: 0.72))
+
+        try service.setFocusAuto()
+        #expect(service.focusState == .auto)
+
+        let focusEvents = logger.events.filter { $0.action == "focus_mode_changed" }
+        #expect(focusEvents.count == 2)
+        #expect(focusEvents[0].payload["mode"] == "locked")
+        #expect(focusEvents[0].payload["lens_position"] == "0.72")
+        #expect(focusEvents[1].payload["mode"] == "auto")
+    }
+
+    @Test("invalid focus values throw and preserve prior state")
+    func invalidFocusValues() throws {
+        let backend = StubCaptureBackend()
+        let service = CaptureSessionService(backend: backend)
+
+        try service.lockFocus(lensPosition: 0.3)
+        let previousState = service.focusState
+
+        #expect(throws: FocusStateMachineError.self) {
+            try service.lockFocus(lensPosition: 1.2)
+        }
+        #expect(service.focusState == previousState)
+    }
+
+    @Test("backend focus apply failure preserves previous state")
+    func backendFocusApplyFailure() throws {
+        let backend = StubCaptureBackend(shouldFailFocusApply: true)
+        let service = CaptureSessionService(backend: backend)
+
+        #expect(service.focusState == .auto)
+        #expect(throws: CaptureSessionError.self) {
+            try service.lockFocus(lensPosition: 0.25)
+        }
+        #expect(service.focusState == .auto)
+    }
+
+    @Test("focus state persists across camera switch")
+    func focusStatePersistsAcrossCameraSwitch() throws {
+        let backend = StubCaptureBackend()
+        let service = CaptureSessionService(backend: backend)
+        try service.start()
+
+        try service.lockFocus(lensPosition: 0.64)
+        try service.switchCamera()
+
+        #expect(service.focusState == .locked(lensPosition: 0.64))
+    }
+
+    @Test("white balance state transitions lock auto")
+    func whiteBalanceStateTransitions() throws {
+        let backend = StubCaptureBackend()
+        let logger = InMemoryCaptureEventLogger()
+        let service = CaptureSessionService(backend: backend, logger: logger)
+
+        #expect(service.whiteBalanceState == .auto)
+
+        try service.lockWhiteBalance(temperatureKelvin: 5_600, tint: -12)
+        #expect(
+            service.whiteBalanceState ==
+            .locked(
+                WhiteBalanceValues(
+                    temperatureKelvin: 5_600,
+                    tint: -12
+                )
+            )
+        )
+
+        try service.setWhiteBalanceAuto()
+        #expect(service.whiteBalanceState == .auto)
+
+        let whiteBalanceEvents = logger.events.filter { $0.action == "white_balance_mode_changed" }
+        #expect(whiteBalanceEvents.count == 2)
+        #expect(whiteBalanceEvents[0].payload["mode"] == "locked")
+        #expect(whiteBalanceEvents[0].payload["temperature_kelvin"] == "5600.0")
+        #expect(whiteBalanceEvents[0].payload["tint"] == "-12.0")
+        #expect(whiteBalanceEvents[1].payload["mode"] == "auto")
+    }
+
+    @Test("invalid white balance values throw and preserve prior state")
+    func invalidWhiteBalanceValues() throws {
+        let backend = StubCaptureBackend()
+        let service = CaptureSessionService(backend: backend)
+
+        try service.lockWhiteBalance(temperatureKelvin: 5_200, tint: 4)
+        let previousState = service.whiteBalanceState
+
+        #expect(throws: WhiteBalanceStateMachineError.self) {
+            try service.lockWhiteBalance(temperatureKelvin: 0, tint: 2)
+        }
+        #expect(service.whiteBalanceState == previousState)
+    }
+
+    @Test("backend white balance apply failure preserves previous state")
+    func backendWhiteBalanceApplyFailure() throws {
+        let backend = StubCaptureBackend(shouldFailWhiteBalanceApply: true)
+        let service = CaptureSessionService(backend: backend)
+
+        #expect(service.whiteBalanceState == .auto)
+        #expect(throws: CaptureSessionError.self) {
+            try service.lockWhiteBalance(temperatureKelvin: 5_000, tint: -8)
+        }
+        #expect(service.whiteBalanceState == .auto)
+    }
+
+    @Test("white balance state persists across camera switch")
+    func whiteBalanceStatePersistsAcrossCameraSwitch() throws {
+        let backend = StubCaptureBackend()
+        let service = CaptureSessionService(backend: backend)
+        try service.start()
+
+        try service.lockWhiteBalance(temperatureKelvin: 5_400, tint: -6)
+        try service.switchCamera()
+
+        #expect(
+            service.whiteBalanceState ==
+            .locked(
+                WhiteBalanceValues(
+                    temperatureKelvin: 5_400,
+                    tint: -6
+                )
+            )
+        )
+    }
+
+    @Test("capture metadata reflects selected white balance values")
+    func captureMetadataReflectsManualWhiteBalanceValues() async throws {
+        let backend = StubCaptureBackend()
+        let service = CaptureSessionService(backend: backend)
+        try service.start()
+
+        try service.lockWhiteBalance(temperatureKelvin: 5_800, tint: -10)
+        let payload = try await service.capturePhotoPayload(format: .processed)
+        guard let metadata = payload.primaryMetadata(for: .processed) else {
+            Issue.record("Expected capture metadata for processed payload.")
+            return
+        }
+
+        #expect(metadata.whiteBalanceMode == "locked")
+        #expect(metadata.whiteBalanceTemperatureKelvin == 5_800)
+        #expect(metadata.whiteBalanceTint == -10)
+    }
 }
 
 private final class StubCaptureBackend: CaptureSessionBackend {
@@ -117,14 +480,26 @@ private final class StubCaptureBackend: CaptureSessionBackend {
     private let shouldFailStart: Bool
     private let shouldFailSwitch: Bool
     private let shouldFailCapture: Bool
+    private let shouldFailExposureApply: Bool
+    private let shouldFailExposureCompensationApply: Bool
+    private let shouldFailFocusApply: Bool
+    private let shouldFailWhiteBalanceApply: Bool
     private let captureData: Data
     private let capturePayload: CapturedPhotoPayload?
     private let rawCapability: RawCaptureCapability
+    private var exposureState: ExposureControlState = .auto
+    private var exposureCompensation: Double = 0
+    private var focusState: FocusControlState = .auto
+    private var whiteBalanceState: WhiteBalanceControlState = .auto
 
     init(
         shouldFailStart: Bool = false,
         shouldFailSwitch: Bool = false,
         shouldFailCapture: Bool = false,
+        shouldFailExposureApply: Bool = false,
+        shouldFailExposureCompensationApply: Bool = false,
+        shouldFailFocusApply: Bool = false,
+        shouldFailWhiteBalanceApply: Bool = false,
         captureData: Data = Data([0xFF, 0xD8, 0xFF, 0xD9]),
         capturePayload: CapturedPhotoPayload? = nil,
         rawCapability: RawCaptureCapability = RawCaptureCapability(
@@ -135,6 +510,10 @@ private final class StubCaptureBackend: CaptureSessionBackend {
         self.shouldFailStart = shouldFailStart
         self.shouldFailSwitch = shouldFailSwitch
         self.shouldFailCapture = shouldFailCapture
+        self.shouldFailExposureApply = shouldFailExposureApply
+        self.shouldFailExposureCompensationApply = shouldFailExposureCompensationApply
+        self.shouldFailFocusApply = shouldFailFocusApply
+        self.shouldFailWhiteBalanceApply = shouldFailWhiteBalanceApply
         self.captureData = captureData
         self.capturePayload = capturePayload
         self.rawCapability = rawCapability
@@ -180,15 +559,91 @@ private final class StubCaptureBackend: CaptureSessionBackend {
             return capturePayload
         }
 
+        let exposureValues: ExposureValues?
+        switch exposureState {
+        case .auto:
+            exposureValues = nil
+        case let .locked(values), let .custom(values):
+            exposureValues = values
+        }
+
+        let whiteBalanceMetadata: (mode: String?, temperatureKelvin: Double?, tint: Double?)
+        switch whiteBalanceState {
+        case .auto:
+            whiteBalanceMetadata = (
+                mode: exposureValues == nil ? nil : "auto",
+                temperatureKelvin: nil,
+                tint: nil
+            )
+        case let .locked(values):
+            whiteBalanceMetadata = (
+                mode: "locked",
+                temperatureKelvin: values.temperatureKelvin,
+                tint: values.tint
+            )
+        }
+
+        let metadata = CaptureTechnicalMetadata(
+            lensModel: "Stub Camera",
+            iso: exposureValues?.iso,
+            shutterSeconds: exposureValues?.shutterSeconds,
+            whiteBalanceMode: whiteBalanceMetadata.mode,
+            whiteBalanceTemperatureKelvin: whiteBalanceMetadata.temperatureKelvin,
+            whiteBalanceTint: whiteBalanceMetadata.tint
+        )
+        let resolvedMetadata = metadata.isEmpty ? nil : metadata
+
         switch format {
         case .processed:
-            return CapturedPhotoPayload(processedData: captureData)
+            return CapturedPhotoPayload(
+                processedData: captureData,
+                processedMetadata: resolvedMetadata
+            )
         case .raw:
-            return CapturedPhotoPayload(rawData: captureData)
+            return CapturedPhotoPayload(
+                rawData: captureData,
+                rawMetadata: resolvedMetadata
+            )
         }
     }
 
     func rawCaptureCapability() -> RawCaptureCapability {
         rawCapability
+    }
+
+    func applyExposureState(_ state: ExposureControlState) throws -> ExposureControlState {
+        if shouldFailExposureApply {
+            throw CaptureSessionError.backendFailure(message: "manual exposure apply failed")
+        }
+        exposureState = state
+        return exposureState
+    }
+
+    func applyExposureCompensation(_ value: Double) throws -> Double {
+        if shouldFailExposureCompensationApply {
+            throw CaptureSessionError.backendFailure(message: "exposure compensation apply failed")
+        }
+        exposureCompensation = value
+        return exposureCompensation
+    }
+
+    func exposureCompensationRange() -> ClosedRange<Double>? {
+        -3...3
+    }
+
+    func applyFocusState(_ state: FocusControlState) throws -> FocusControlState {
+        if shouldFailFocusApply {
+            throw CaptureSessionError.backendFailure(message: "manual focus apply failed")
+        }
+        focusState = state
+        return focusState
+    }
+
+    func applyWhiteBalanceState(_ state: WhiteBalanceControlState) throws -> WhiteBalanceControlState {
+        if shouldFailWhiteBalanceApply {
+            throw CaptureSessionError.backendFailure(message: "manual white balance apply failed")
+        }
+        whiteBalanceState = state
+        return whiteBalanceState
     }
 }

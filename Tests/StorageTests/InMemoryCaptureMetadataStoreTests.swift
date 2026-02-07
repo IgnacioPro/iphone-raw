@@ -41,4 +41,37 @@ struct InMemoryCaptureMetadataStoreTests {
         let all = await store.fetchAll()
         #expect(all.map(\.id) == [newer.id, older.id])
     }
+
+    @Test("delete removes artifacts by primary or paired local identifier")
+    func deleteByLocalIdentifier() async {
+        let store = InMemoryCaptureMetadataStore()
+        let keepArtifact = CaptureArtifact(
+            id: UUID(uuidString: "33333333-3333-3333-3333-333333333333")!,
+            createdAt: Date(timeIntervalSince1970: 30),
+            primaryURL: URL(fileURLWithPath: "/tmp/keep.dng"),
+            photoLibraryLocalIdentifier: "KEEP-1"
+        )
+        let deleteByPrimaryArtifact = CaptureArtifact(
+            id: UUID(uuidString: "44444444-4444-4444-4444-444444444444")!,
+            createdAt: Date(timeIntervalSince1970: 40),
+            primaryURL: URL(fileURLWithPath: "/tmp/delete-primary.dng"),
+            photoLibraryLocalIdentifier: "DEL-PRIMARY"
+        )
+        let deleteByPairArtifact = CaptureArtifact(
+            id: UUID(uuidString: "55555555-5555-5555-5555-555555555555")!,
+            createdAt: Date(timeIntervalSince1970: 50),
+            primaryURL: URL(fileURLWithPath: "/tmp/delete-pair.dng"),
+            photoLibraryLocalIdentifier: "DEL-OWNER",
+            metadata: ["paired_photo_library_local_identifier": "DEL-PAIRED"]
+        )
+
+        await store.save(keepArtifact)
+        await store.save(deleteByPrimaryArtifact)
+        await store.save(deleteByPairArtifact)
+
+        await store.delete(photoLibraryLocalIdentifiers: Set(["DEL-PRIMARY", "DEL-PAIRED"]))
+
+        let remaining = await store.fetchAll()
+        #expect(remaining.map(\.id) == [keepArtifact.id])
+    }
 }

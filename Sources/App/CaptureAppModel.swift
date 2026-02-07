@@ -128,6 +128,66 @@ public final class CaptureAppModel {
         sessionService.rawCaptureCapability()
     }
 
+    public func exposureState() -> ExposureControlState {
+        sessionService.exposureState
+    }
+
+    public func setExposureAuto() throws {
+        try sessionService.setExposureAuto()
+    }
+
+    public func lockExposure(iso: Double, shutterSeconds: Double) throws {
+        try sessionService.lockExposure(iso: iso, shutterSeconds: shutterSeconds)
+    }
+
+    public func setCustomExposure(iso: Double, shutterSeconds: Double) throws {
+        try sessionService.setCustomExposure(iso: iso, shutterSeconds: shutterSeconds)
+    }
+
+    public func exposureCompensation() -> Double {
+        sessionService.exposureCompensation
+    }
+
+    public func exposureCompensationRange() -> ClosedRange<Double> {
+        sessionService.exposureCompensationRange
+    }
+
+    public func setExposureCompensation(_ value: Double) throws {
+        try sessionService.setExposureCompensation(value)
+    }
+
+    public func resetExposureCompensation() throws {
+        try sessionService.resetExposureCompensation()
+    }
+
+    public func focusState() -> FocusControlState {
+        sessionService.focusState
+    }
+
+    public func setFocusAuto() throws {
+        try sessionService.setFocusAuto()
+    }
+
+    public func lockFocus(lensPosition: Double) throws {
+        try sessionService.lockFocus(lensPosition: lensPosition)
+    }
+
+    public func whiteBalanceState() -> WhiteBalanceControlState {
+        sessionService.whiteBalanceState
+    }
+
+    public func setWhiteBalanceAuto() throws {
+        try sessionService.setWhiteBalanceAuto()
+    }
+
+    public func lockWhiteBalance(temperatureKelvin: Double, tint: Double) throws {
+        try sessionService.lockWhiteBalance(temperatureKelvin: temperatureKelvin, tint: tint)
+    }
+
+    public func markSessionInterrupted(reason: String) {
+        sessionService.markInterrupted(reason: reason)
+    }
+
     #if canImport(AVFoundation)
     public var previewSession: AVCaptureSession? {
         sessionService.previewSession
@@ -138,6 +198,19 @@ public final class CaptureAppModel {
         await metadataStore.save(artifact)
     }
 
+    public func removePhotoLibraryCaptures(localIdentifiers: [String]) async {
+        let normalizedIdentifiers = Set(localIdentifiers)
+        guard !normalizedIdentifiers.isEmpty else { return }
+        await metadataStore.delete(photoLibraryLocalIdentifiers: normalizedIdentifiers)
+        logger?.log(
+            CaptureEvent(
+                category: .storage,
+                action: "capture_metadata_deleted",
+                payload: ["count": "\(normalizedIdentifiers.count)"]
+            )
+        )
+    }
+
     public func persistPhotoLibraryCapture(
         localIdentifier: String,
         capturedAt: Date,
@@ -145,7 +218,9 @@ public final class CaptureAppModel {
         byteCount: Int,
         captureFormat: CapturePhotoFormat,
         pairedLocalIdentifier: String? = nil,
-        pairedByteCount: Int? = nil
+        pairedByteCount: Int? = nil,
+        captureMetadata: CaptureTechnicalMetadata? = nil,
+        pairedCaptureMetadata: CaptureTechnicalMetadata? = nil
     ) async {
         var metadata: [String: String] = [
             "photo_library_local_identifier": localIdentifier,
@@ -160,6 +235,8 @@ public final class CaptureAppModel {
         if let pairedByteCount {
             metadata["paired_byte_count"] = String(pairedByteCount)
         }
+        appendCaptureMetadata(captureMetadata, prefix: "capture_", to: &metadata)
+        appendCaptureMetadata(pairedCaptureMetadata, prefix: "paired_capture_", to: &metadata)
 
         let artifact = CaptureArtifact(
             createdAt: capturedAt,
@@ -176,6 +253,32 @@ public final class CaptureAppModel {
                 payload: metadata
             )
         )
+    }
+
+    private func appendCaptureMetadata(
+        _ captureMetadata: CaptureTechnicalMetadata?,
+        prefix: String,
+        to metadata: inout [String: String]
+    ) {
+        guard let captureMetadata else { return }
+        if let lensModel = captureMetadata.lensModel {
+            metadata["\(prefix)lens_model"] = lensModel
+        }
+        if let iso = captureMetadata.iso {
+            metadata["\(prefix)iso"] = String(iso)
+        }
+        if let shutterSeconds = captureMetadata.shutterSeconds {
+            metadata["\(prefix)shutter_seconds"] = String(shutterSeconds)
+        }
+        if let whiteBalanceMode = captureMetadata.whiteBalanceMode {
+            metadata["\(prefix)white_balance_mode"] = whiteBalanceMode
+        }
+        if let whiteBalanceTemperatureKelvin = captureMetadata.whiteBalanceTemperatureKelvin {
+            metadata["\(prefix)white_balance_temperature_kelvin"] = String(whiteBalanceTemperatureKelvin)
+        }
+        if let whiteBalanceTint = captureMetadata.whiteBalanceTint {
+            metadata["\(prefix)white_balance_tint"] = String(whiteBalanceTint)
+        }
     }
 }
 

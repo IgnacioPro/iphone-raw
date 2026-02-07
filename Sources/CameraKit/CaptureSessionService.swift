@@ -40,10 +40,19 @@ public enum CapturePhotoFormat: String, Equatable, Sendable {
 public struct CapturedPhotoPayload: Equatable, Sendable {
     public let processedData: Data?
     public let rawData: Data?
+    public let processedMetadata: CaptureTechnicalMetadata?
+    public let rawMetadata: CaptureTechnicalMetadata?
 
-    public init(processedData: Data? = nil, rawData: Data? = nil) {
+    public init(
+        processedData: Data? = nil,
+        rawData: Data? = nil,
+        processedMetadata: CaptureTechnicalMetadata? = nil,
+        rawMetadata: CaptureTechnicalMetadata? = nil
+    ) {
         self.processedData = processedData
         self.rawData = rawData
+        self.processedMetadata = processedMetadata
+        self.rawMetadata = rawMetadata
     }
 
     public var totalByteCount: Int {
@@ -68,6 +77,24 @@ public struct CapturedPhotoPayload: Equatable, Sendable {
             return rawData
         case .raw:
             return processedData
+        }
+    }
+
+    public func primaryMetadata(for format: CapturePhotoFormat) -> CaptureTechnicalMetadata? {
+        switch format {
+        case .processed:
+            return processedMetadata ?? rawMetadata
+        case .raw:
+            return rawMetadata ?? processedMetadata
+        }
+    }
+
+    public func secondaryMetadata(for format: CapturePhotoFormat) -> CaptureTechnicalMetadata? {
+        switch format {
+        case .processed:
+            return rawMetadata
+        case .raw:
+            return processedMetadata
         }
     }
 }
@@ -105,10 +132,20 @@ public protocol CaptureSessionBackend {
     func capturePhoto(format: CapturePhotoFormat) async throws -> Data
     func capturePhotoPayload(format: CapturePhotoFormat) async throws -> CapturedPhotoPayload
     func rawCaptureCapability() -> RawCaptureCapability
+    func applyExposureState(_ state: ExposureControlState) throws -> ExposureControlState
+    func applyFocusState(_ state: FocusControlState) throws -> FocusControlState
+    func applyWhiteBalanceState(_ state: WhiteBalanceControlState) throws -> WhiteBalanceControlState
+    func applyExposureCompensation(_ value: Double) throws -> Double
+    func exposureCompensationRange() -> ClosedRange<Double>?
 }
 
 public protocol CaptureSessionServing {
     var state: CaptureSessionState { get }
+    var exposureState: ExposureControlState { get }
+    var focusState: FocusControlState { get }
+    var whiteBalanceState: WhiteBalanceControlState { get }
+    var exposureCompensation: Double { get }
+    var exposureCompensationRange: ClosedRange<Double> { get }
     #if canImport(AVFoundation)
     var previewSession: AVCaptureSession? { get }
     #endif
@@ -120,6 +157,15 @@ public protocol CaptureSessionServing {
     func capturePhotoPayload(format: CapturePhotoFormat) async throws -> CapturedPhotoPayload
     func rawCaptureCapability() -> RawCaptureCapability
     func markInterrupted(reason: String)
+    func setExposureAuto() throws
+    func lockExposure(iso: Double, shutterSeconds: Double) throws
+    func setCustomExposure(iso: Double, shutterSeconds: Double) throws
+    func setFocusAuto() throws
+    func lockFocus(lensPosition: Double) throws
+    func setWhiteBalanceAuto() throws
+    func lockWhiteBalance(temperatureKelvin: Double, tint: Double) throws
+    func setExposureCompensation(_ value: Double) throws
+    func resetExposureCompensation() throws
 }
 
 public extension CaptureSessionBackend {
@@ -140,6 +186,26 @@ public extension CaptureSessionBackend {
         case .raw:
             return CapturedPhotoPayload(rawData: data)
         }
+    }
+
+    func applyExposureState(_ state: ExposureControlState) throws -> ExposureControlState {
+        state
+    }
+
+    func applyFocusState(_ state: FocusControlState) throws -> FocusControlState {
+        state
+    }
+
+    func applyWhiteBalanceState(_ state: WhiteBalanceControlState) throws -> WhiteBalanceControlState {
+        state
+    }
+
+    func applyExposureCompensation(_ value: Double) throws -> Double {
+        value
+    }
+
+    func exposureCompensationRange() -> ClosedRange<Double>? {
+        nil
     }
 }
 
@@ -164,6 +230,10 @@ public final class CaptureSessionService: CaptureSessionServing {
     private let logger: CaptureEventLogging?
     private let lock = NSLock()
     private var mutableState: CaptureSessionState = .idle
+    private var exposureStateMachine = ExposureStateMachine()
+    private var focusStateMachine = FocusStateMachine()
+    private var whiteBalanceStateMachine = WhiteBalanceStateMachine()
+    private var mutableExposureCompensation: Double = 0
 
     public init(
         backend: CaptureSessionBackend = AVCaptureSessionBackend(),
@@ -177,6 +247,26 @@ public final class CaptureSessionService: CaptureSessionServing {
         lock.withLock { mutableState }
     }
 
+    public var exposureState: ExposureControlState {
+        lock.withLock { exposureStateMachine.state }
+    }
+
+    public var focusState: FocusControlState {
+        lock.withLock { focusStateMachine.state }
+    }
+
+    public var whiteBalanceState: WhiteBalanceControlState {
+        lock.withLock { whiteBalanceStateMachine.state }
+    }
+
+    public var exposureCompensation: Double {
+        lock.withLock { mutableExposureCompensation }
+    }
+
+    public var exposureCompensationRange: ClosedRange<Double> {
+        backend.exposureCompensationRange() ?? (-2.0...2.0)
+    }
+
     #if canImport(AVFoundation)
     public var previewSession: AVCaptureSession? {
         backend.previewSession
@@ -186,7 +276,19 @@ public final class CaptureSessionService: CaptureSessionServing {
     public func start() throws {
         do {
             try backend.startRunning()
+            let configuredExposureState = lock.withLock { exposureStateMachine.state }
+            let appliedExposureState = try backend.applyExposureState(configuredExposureState)
+            let configuredFocusState = lock.withLock { focusStateMachine.state }
+            let appliedFocusState = try backend.applyFocusState(configuredFocusState)
+            let configuredWhiteBalanceState = lock.withLock { whiteBalanceStateMachine.state }
+            let appliedWhiteBalanceState = try backend.applyWhiteBalanceState(configuredWhiteBalanceState)
+            let configuredExposureCompensation = lock.withLock { mutableExposureCompensation }
+            let appliedExposureCompensation = try backend.applyExposureCompensation(configuredExposureCompensation)
             lock.withLock {
+                exposureStateMachine = ExposureStateMachine(initialState: appliedExposureState)
+                focusStateMachine = FocusStateMachine(initialState: appliedFocusState)
+                whiteBalanceStateMachine = WhiteBalanceStateMachine(initialState: appliedWhiteBalanceState)
+                mutableExposureCompensation = appliedExposureCompensation
                 mutableState = .running(position: backend.activeLensPosition)
             }
             logger?.log(
@@ -228,7 +330,19 @@ public final class CaptureSessionService: CaptureSessionServing {
     public func switchCamera() throws {
         do {
             let newPosition = try backend.switchCamera()
+            let configuredExposureState = lock.withLock { exposureStateMachine.state }
+            let appliedExposureState = try backend.applyExposureState(configuredExposureState)
+            let configuredFocusState = lock.withLock { focusStateMachine.state }
+            let appliedFocusState = try backend.applyFocusState(configuredFocusState)
+            let configuredWhiteBalanceState = lock.withLock { whiteBalanceStateMachine.state }
+            let appliedWhiteBalanceState = try backend.applyWhiteBalanceState(configuredWhiteBalanceState)
+            let configuredExposureCompensation = lock.withLock { mutableExposureCompensation }
+            let appliedExposureCompensation = try backend.applyExposureCompensation(configuredExposureCompensation)
             lock.withLock {
+                exposureStateMachine = ExposureStateMachine(initialState: appliedExposureState)
+                focusStateMachine = FocusStateMachine(initialState: appliedFocusState)
+                whiteBalanceStateMachine = WhiteBalanceStateMachine(initialState: appliedWhiteBalanceState)
+                mutableExposureCompensation = appliedExposureCompensation
                 mutableState = .running(position: newPosition)
             }
             logger?.log(
@@ -267,34 +381,126 @@ public final class CaptureSessionService: CaptureSessionServing {
         )
     }
 
+    public func setExposureAuto() throws {
+        _ = try applyExposureTransition(.setAuto)
+    }
+
+    public func lockExposure(iso: Double, shutterSeconds: Double) throws {
+        _ = try applyExposureTransition(
+            .lock(
+                ExposureValues(
+                    iso: iso,
+                    shutterSeconds: shutterSeconds
+                )
+            )
+        )
+    }
+
+    public func setCustomExposure(iso: Double, shutterSeconds: Double) throws {
+        _ = try applyExposureTransition(
+            .setCustom(
+                ExposureValues(
+                    iso: iso,
+                    shutterSeconds: shutterSeconds
+                )
+            )
+        )
+    }
+
+    public func setFocusAuto() throws {
+        _ = try applyFocusTransition(.setAuto)
+    }
+
+    public func lockFocus(lensPosition: Double) throws {
+        _ = try applyFocusTransition(.lock(lensPosition: lensPosition))
+    }
+
+    public func setWhiteBalanceAuto() throws {
+        _ = try applyWhiteBalanceTransition(.setAuto)
+    }
+
+    public func lockWhiteBalance(temperatureKelvin: Double, tint: Double) throws {
+        _ = try applyWhiteBalanceTransition(
+            .lock(
+                WhiteBalanceValues(
+                    temperatureKelvin: temperatureKelvin,
+                    tint: tint
+                )
+            )
+        )
+    }
+
+    public func setExposureCompensation(_ value: Double) throws {
+        _ = try applyExposureCompensation(value)
+    }
+
+    public func resetExposureCompensation() throws {
+        _ = try applyExposureCompensation(0)
+    }
+
     public func capturePhoto() async throws -> Data {
         try await capturePhoto(format: .processed)
     }
 
     public func capturePhoto(format: CapturePhotoFormat) async throws -> Data {
+        let payload = try await capturePhotoPayload(format: format)
+        return try payload.primaryData(for: format)
+    }
+
+    public func capturePhotoPayload(format: CapturePhotoFormat) async throws -> CapturedPhotoPayload {
+        let captureID = UUID()
+        let startedAt = Date()
+        logger?.log(
+            CaptureEvent(
+                category: .capture,
+                action: "photo_capture_started",
+                payload: [
+                    "capture_id": captureID.uuidString,
+                    "format": format.rawValue,
+                    "capture_started_at": startedAt.ISO8601Format(),
+                ]
+            )
+        )
+
         do {
-            let payload = try await capturePhotoPayload(format: format)
-            let data = try payload.primaryData(for: format)
+            let payload = try await backend.capturePhotoPayload(format: format)
+            let endedAt = Date()
+            let primaryData = try payload.primaryData(for: format)
+            let secondaryByteCount = payload.secondaryData(for: format)?.count
+            var eventPayload: [String: String] = [
+                "capture_id": captureID.uuidString,
+                "format": format.rawValue,
+                "capture_started_at": startedAt.ISO8601Format(),
+                "capture_ended_at": endedAt.ISO8601Format(),
+                "capture_latency_ms": "\(Self.captureLatencyMilliseconds(from: startedAt, to: endedAt))",
+                "bytes": "\(primaryData.count)",
+                "total_bytes": "\(payload.totalByteCount)",
+            ]
+            if let secondaryByteCount {
+                eventPayload["paired_bytes"] = "\(secondaryByteCount)"
+            }
             logger?.log(
                 CaptureEvent(
                     category: .capture,
                     action: "photo_capture_succeeded",
-                    payload: [
-                        "bytes": "\(data.count)",
-                        "format": format.rawValue,
-                    ]
+                    payload: eventPayload
                 )
             )
-            return data
+            return payload
         } catch {
+            let endedAt = Date()
             let message = String(describing: error)
             logger?.log(
                 CaptureEvent(
                     category: .capture,
                     action: "photo_capture_failed",
                     payload: [
-                        "error": message,
+                        "capture_id": captureID.uuidString,
                         "format": format.rawValue,
+                        "capture_started_at": startedAt.ISO8601Format(),
+                        "capture_ended_at": endedAt.ISO8601Format(),
+                        "capture_latency_ms": "\(Self.captureLatencyMilliseconds(from: startedAt, to: endedAt))",
+                        "error": message,
                     ]
                 )
             )
@@ -302,18 +508,208 @@ public final class CaptureSessionService: CaptureSessionServing {
         }
     }
 
-    public func capturePhotoPayload(format: CapturePhotoFormat) async throws -> CapturedPhotoPayload {
-        try await backend.capturePhotoPayload(format: format)
-    }
-
     public func rawCaptureCapability() -> RawCaptureCapability {
         backend.rawCaptureCapability()
+    }
+
+    private static func captureLatencyMilliseconds(from start: Date, to end: Date) -> Int {
+        max(Int((end.timeIntervalSince(start) * 1_000).rounded()), 0)
+    }
+
+    @discardableResult
+    private func applyExposureTransition(_ transition: ExposureStateTransition) throws -> ExposureControlState {
+        let previousState = lock.withLock { exposureStateMachine.state }
+        let requestedState = try lock.withLock {
+            try exposureStateMachine.apply(transition)
+        }
+
+        do {
+            let appliedState = try backend.applyExposureState(requestedState)
+            lock.withLock {
+                exposureStateMachine = ExposureStateMachine(initialState: appliedState)
+            }
+            logExposureModeChange(state: appliedState)
+            return appliedState
+        } catch {
+            lock.withLock {
+                exposureStateMachine = ExposureStateMachine(initialState: previousState)
+            }
+            logger?.log(
+                CaptureEvent(
+                    category: .capture,
+                    action: "exposure_mode_change_failed",
+                    payload: [
+                        "mode": requestedState.mode.rawValue,
+                        "error": String(describing: error),
+                    ]
+                )
+            )
+            throw error
+        }
+    }
+
+    @discardableResult
+    private func applyFocusTransition(_ transition: FocusStateTransition) throws -> FocusControlState {
+        let previousState = lock.withLock { focusStateMachine.state }
+        let requestedState = try lock.withLock {
+            try focusStateMachine.apply(transition)
+        }
+
+        do {
+            let appliedState = try backend.applyFocusState(requestedState)
+            lock.withLock {
+                focusStateMachine = FocusStateMachine(initialState: appliedState)
+            }
+            logFocusModeChange(state: appliedState)
+            return appliedState
+        } catch {
+            lock.withLock {
+                focusStateMachine = FocusStateMachine(initialState: previousState)
+            }
+            logger?.log(
+                CaptureEvent(
+                    category: .capture,
+                    action: "focus_mode_change_failed",
+                    payload: [
+                        "mode": requestedState.mode.rawValue,
+                        "error": String(describing: error),
+                    ]
+                )
+            )
+            throw error
+        }
+    }
+
+    @discardableResult
+    private func applyWhiteBalanceTransition(_ transition: WhiteBalanceStateTransition) throws -> WhiteBalanceControlState {
+        let previousState = lock.withLock { whiteBalanceStateMachine.state }
+        let requestedState = try lock.withLock {
+            try whiteBalanceStateMachine.apply(transition)
+        }
+
+        do {
+            let appliedState = try backend.applyWhiteBalanceState(requestedState)
+            lock.withLock {
+                whiteBalanceStateMachine = WhiteBalanceStateMachine(initialState: appliedState)
+            }
+            logWhiteBalanceModeChange(state: appliedState)
+            return appliedState
+        } catch {
+            lock.withLock {
+                whiteBalanceStateMachine = WhiteBalanceStateMachine(initialState: previousState)
+            }
+            logger?.log(
+                CaptureEvent(
+                    category: .capture,
+                    action: "white_balance_mode_change_failed",
+                    payload: [
+                        "mode": requestedState.mode.rawValue,
+                        "error": String(describing: error),
+                    ]
+                )
+            )
+            throw error
+        }
+    }
+
+    private func logExposureModeChange(state: ExposureControlState) {
+        var payload: [String: String] = [
+            "mode": state.mode.rawValue,
+        ]
+        if let values = state.values {
+            payload["iso"] = String(values.iso)
+            payload["shutter_seconds"] = String(values.shutterSeconds)
+        }
+        logger?.log(
+            CaptureEvent(
+                category: .capture,
+                action: "exposure_mode_changed",
+                payload: payload
+            )
+        )
+    }
+
+    private func logFocusModeChange(state: FocusControlState) {
+        var payload: [String: String] = [
+            "mode": state.mode.rawValue,
+        ]
+        if let lensPosition = state.lensPosition {
+            payload["lens_position"] = String(lensPosition)
+        }
+        logger?.log(
+            CaptureEvent(
+                category: .capture,
+                action: "focus_mode_changed",
+                payload: payload
+            )
+        )
+    }
+
+    private func logWhiteBalanceModeChange(state: WhiteBalanceControlState) {
+        var payload: [String: String] = [
+            "mode": state.mode.rawValue,
+        ]
+        if let values = state.values {
+            payload["temperature_kelvin"] = String(values.temperatureKelvin)
+            payload["tint"] = String(values.tint)
+        }
+        logger?.log(
+            CaptureEvent(
+                category: .capture,
+                action: "white_balance_mode_changed",
+                payload: payload
+            )
+        )
+    }
+
+    @discardableResult
+    private func applyExposureCompensation(_ value: Double) throws -> Double {
+        guard value.isFinite else {
+            throw CaptureSessionError.backendFailure(message: "Exposure compensation value must be finite.")
+        }
+
+        let previousValue = lock.withLock { mutableExposureCompensation }
+        do {
+            let appliedValue = try backend.applyExposureCompensation(value)
+            lock.withLock {
+                mutableExposureCompensation = appliedValue
+            }
+            logger?.log(
+                CaptureEvent(
+                    category: .capture,
+                    action: "exposure_compensation_changed",
+                    payload: [
+                        "ev": String(appliedValue),
+                    ]
+                )
+            )
+            return appliedValue
+        } catch {
+            lock.withLock {
+                mutableExposureCompensation = previousValue
+            }
+            logger?.log(
+                CaptureEvent(
+                    category: .capture,
+                    action: "exposure_compensation_change_failed",
+                    payload: [
+                        "ev": String(value),
+                        "error": String(describing: error),
+                    ]
+                )
+            )
+            throw error
+        }
     }
 }
 
 public final class SimulatedCaptureSessionBackend: CaptureSessionBackend {
     public private(set) var isRunning = false
     public private(set) var activeLensPosition: CaptureLensPosition
+    private var exposureState: ExposureControlState = .auto
+    private var focusState: FocusControlState = .auto
+    private var whiteBalanceState: WhiteBalanceControlState = .auto
+    private var exposureCompensation: Double = 0
 
     public init(initialPosition: CaptureLensPosition = .back) {
         self.activeLensPosition = initialPosition
@@ -349,6 +745,30 @@ public final class SimulatedCaptureSessionBackend: CaptureSessionBackend {
             availableRawPhotoPixelFormatTypes: [],
             reason: "RAW photo capture is unavailable in the simulated backend."
         )
+    }
+
+    public func applyExposureState(_ state: ExposureControlState) throws -> ExposureControlState {
+        exposureState = state
+        return exposureState
+    }
+
+    public func applyFocusState(_ state: FocusControlState) throws -> FocusControlState {
+        focusState = state
+        return focusState
+    }
+
+    public func applyWhiteBalanceState(_ state: WhiteBalanceControlState) throws -> WhiteBalanceControlState {
+        whiteBalanceState = state
+        return whiteBalanceState
+    }
+
+    public func applyExposureCompensation(_ value: Double) throws -> Double {
+        exposureCompensation = value
+        return exposureCompensation
+    }
+
+    public func exposureCompensationRange() -> ClosedRange<Double>? {
+        -3...3
     }
 }
 
@@ -431,7 +851,11 @@ public final class AVCaptureSessionBackend: CaptureSessionBackend {
         return try await withCheckedThrowingContinuation { continuation in
             let completionBox = CaptureCompletionBox(continuation: continuation)
             let captureID = UUID()
-            let processor = PhotoCaptureProcessor(requestedFormat: format) { [weak self] result in
+            let metadataSnapshot = captureMetadataSnapshot()
+            let processor = PhotoCaptureProcessor(
+                requestedFormat: format,
+                metadataSnapshot: metadataSnapshot
+            ) { [weak self] result in
                 self?.removeInFlightCapture(captureID)
                 completionBox.resume(with: result)
             }
@@ -481,7 +905,274 @@ public final class AVCaptureSessionBackend: CaptureSessionBackend {
         #endif
     }
 
+    public func applyExposureState(_ state: ExposureControlState) throws -> ExposureControlState {
+        #if canImport(AVFoundation)
+        try configureSessionIfNeeded(for: activeLensPosition)
+        guard let activeDevice = session.inputs.compactMap({ $0 as? AVCaptureDeviceInput }).first?.device else {
+            throw CaptureSessionError.backendFailure(message: "No active camera device is configured.")
+        }
+
+        do {
+            try activeDevice.lockForConfiguration()
+        } catch {
+            throw CaptureSessionError.backendFailure(
+                message: "Could not lock active camera device for exposure configuration."
+            )
+        }
+        defer { activeDevice.unlockForConfiguration() }
+
+        switch state {
+        case .auto:
+            if activeDevice.isExposureModeSupported(.continuousAutoExposure) {
+                activeDevice.exposureMode = .continuousAutoExposure
+                return .auto
+            }
+            if activeDevice.isExposureModeSupported(.autoExpose) {
+                activeDevice.exposureMode = .autoExpose
+                return .auto
+            }
+            throw CaptureSessionError.backendFailure(
+                message: "Auto exposure is not supported by the active camera."
+            )
+        case let .locked(values):
+            return .locked(try applyManualExposure(values, to: activeDevice))
+        case let .custom(values):
+            return .custom(try applyManualExposure(values, to: activeDevice))
+        }
+        #else
+        return state
+        #endif
+    }
+
+    public func applyWhiteBalanceState(_ state: WhiteBalanceControlState) throws -> WhiteBalanceControlState {
+        #if canImport(AVFoundation)
+        try configureSessionIfNeeded(for: activeLensPosition)
+        guard let activeDevice = session.inputs.compactMap({ $0 as? AVCaptureDeviceInput }).first?.device else {
+            throw CaptureSessionError.backendFailure(message: "No active camera device is configured.")
+        }
+
+        do {
+            try activeDevice.lockForConfiguration()
+        } catch {
+            throw CaptureSessionError.backendFailure(
+                message: "Could not lock active camera device for white balance configuration."
+            )
+        }
+        defer { activeDevice.unlockForConfiguration() }
+
+        switch state {
+        case .auto:
+            if activeDevice.isWhiteBalanceModeSupported(.continuousAutoWhiteBalance) {
+                activeDevice.whiteBalanceMode = .continuousAutoWhiteBalance
+                return .auto
+            }
+            if activeDevice.isWhiteBalanceModeSupported(.autoWhiteBalance) {
+                activeDevice.whiteBalanceMode = .autoWhiteBalance
+                return .auto
+            }
+            throw CaptureSessionError.backendFailure(
+                message: "Auto white balance is not supported by the active camera."
+            )
+        case let .locked(values):
+            return .locked(try applyLockedWhiteBalance(values, to: activeDevice))
+        }
+        #else
+        return state
+        #endif
+    }
+
+    public func applyExposureCompensation(_ value: Double) throws -> Double {
+        #if canImport(AVFoundation)
+        try configureSessionIfNeeded(for: activeLensPosition)
+        guard let activeDevice = session.inputs.compactMap({ $0 as? AVCaptureDeviceInput }).first?.device else {
+            throw CaptureSessionError.backendFailure(message: "No active camera device is configured.")
+        }
+
+        #if os(iOS) || targetEnvironment(macCatalyst) || os(tvOS)
+        let range = Double(activeDevice.minExposureTargetBias)...Double(activeDevice.maxExposureTargetBias)
+        let clampedValue = min(max(value, range.lowerBound), range.upperBound)
+        do {
+            try activeDevice.lockForConfiguration()
+        } catch {
+            throw CaptureSessionError.backendFailure(
+                message: "Could not lock active camera device for EV compensation."
+            )
+        }
+        defer { activeDevice.unlockForConfiguration() }
+        activeDevice.setExposureTargetBias(Float(clampedValue), completionHandler: nil)
+        return clampedValue
+        #else
+        throw CaptureSessionError.backendFailure(
+            message: "Exposure compensation controls are unavailable on this platform."
+        )
+        #endif
+        #else
+        return value
+        #endif
+    }
+
+    public func exposureCompensationRange() -> ClosedRange<Double>? {
+        #if canImport(AVFoundation)
+        do {
+            try configureSessionIfNeeded(for: activeLensPosition)
+        } catch {
+            return nil
+        }
+        guard let activeDevice = session.inputs.compactMap({ $0 as? AVCaptureDeviceInput }).first?.device else {
+            return nil
+        }
+        #if os(iOS) || targetEnvironment(macCatalyst) || os(tvOS)
+        return Double(activeDevice.minExposureTargetBias)...Double(activeDevice.maxExposureTargetBias)
+        #else
+        return nil
+        #endif
+        #else
+        return nil
+        #endif
+    }
+
+    public func applyFocusState(_ state: FocusControlState) throws -> FocusControlState {
+        #if canImport(AVFoundation)
+        try configureSessionIfNeeded(for: activeLensPosition)
+        guard let activeDevice = session.inputs.compactMap({ $0 as? AVCaptureDeviceInput }).first?.device else {
+            throw CaptureSessionError.backendFailure(message: "No active camera device is configured.")
+        }
+
+        do {
+            try activeDevice.lockForConfiguration()
+        } catch {
+            throw CaptureSessionError.backendFailure(
+                message: "Could not lock active camera device for focus configuration."
+            )
+        }
+        defer { activeDevice.unlockForConfiguration() }
+
+        switch state {
+        case .auto:
+            if activeDevice.isFocusModeSupported(.continuousAutoFocus) {
+                activeDevice.focusMode = .continuousAutoFocus
+                return .auto
+            }
+            if activeDevice.isFocusModeSupported(.autoFocus) {
+                activeDevice.focusMode = .autoFocus
+                return .auto
+            }
+            throw CaptureSessionError.backendFailure(
+                message: "Auto focus is not supported by the active camera."
+            )
+        case let .locked(lensPosition):
+            return .locked(lensPosition: try applyLockedFocus(lensPosition, to: activeDevice))
+        }
+        #else
+        return state
+        #endif
+    }
+
     #if canImport(AVFoundation)
+    private func applyLockedFocus(_ lensPosition: Double, to device: AVCaptureDevice) throws -> Double {
+        #if os(iOS) || targetEnvironment(macCatalyst) || os(tvOS)
+        guard device.isFocusModeSupported(.locked) else {
+            throw CaptureSessionError.backendFailure(
+                message: "Manual focus lock is not supported by the active camera."
+            )
+        }
+        let clampedPosition = min(max(lensPosition, 0), 1)
+        device.setFocusModeLocked(lensPosition: Float(clampedPosition), completionHandler: nil)
+        return clampedPosition
+        #else
+        throw CaptureSessionError.backendFailure(
+            message: "Manual focus controls are unavailable on this platform."
+        )
+        #endif
+    }
+
+    private func applyLockedWhiteBalance(
+        _ values: WhiteBalanceValues,
+        to device: AVCaptureDevice
+    ) throws -> WhiteBalanceValues {
+        #if os(iOS) || targetEnvironment(macCatalyst) || os(tvOS)
+        guard device.isWhiteBalanceModeSupported(.locked) else {
+            throw CaptureSessionError.backendFailure(
+                message: "Manual white balance lock is not supported by the active camera."
+            )
+        }
+
+        let temperatureAndTint = AVCaptureDevice.WhiteBalanceTemperatureAndTintValues(
+            temperature: Float(values.temperatureKelvin),
+            tint: Float(values.tint)
+        )
+        let convertedGains = device.deviceWhiteBalanceGains(for: temperatureAndTint)
+        let clampedGains = clampedWhiteBalanceGains(convertedGains, for: device)
+        device.setWhiteBalanceModeLocked(with: clampedGains, completionHandler: nil)
+        let appliedTemperatureAndTint = device.temperatureAndTintValues(for: clampedGains)
+
+        return WhiteBalanceValues(
+            temperatureKelvin: Double(appliedTemperatureAndTint.temperature),
+            tint: Double(appliedTemperatureAndTint.tint)
+        )
+        #else
+        throw CaptureSessionError.backendFailure(
+            message: "Manual white balance controls are unavailable on this platform."
+        )
+        #endif
+    }
+
+    #if os(iOS) || targetEnvironment(macCatalyst) || os(tvOS)
+    private func clampedWhiteBalanceGains(
+        _ gains: AVCaptureDevice.WhiteBalanceGains,
+        for device: AVCaptureDevice
+    ) -> AVCaptureDevice.WhiteBalanceGains {
+        let minimumGain: Float = 1.0
+        let maximumGain = max(device.maxWhiteBalanceGain, minimumGain)
+        var clamped = gains
+        clamped.redGain = min(max(clamped.redGain, minimumGain), maximumGain)
+        clamped.greenGain = min(max(clamped.greenGain, minimumGain), maximumGain)
+        clamped.blueGain = min(max(clamped.blueGain, minimumGain), maximumGain)
+        return clamped
+    }
+    #endif
+
+    private func applyManualExposure(_ values: ExposureValues, to device: AVCaptureDevice) throws -> ExposureValues {
+        #if os(iOS) || targetEnvironment(macCatalyst) || os(tvOS)
+        guard device.isExposureModeSupported(.custom) else {
+            throw CaptureSessionError.backendFailure(
+                message: "Manual exposure controls are not supported by the active camera."
+            )
+        }
+
+        let clampedISO = min(
+            max(values.iso, Double(device.activeFormat.minISO)),
+            Double(device.activeFormat.maxISO)
+        )
+        let minimumDuration = max(device.activeFormat.minExposureDuration.seconds, 1.0 / 12_000.0)
+        let maximumDuration = max(device.activeFormat.maxExposureDuration.seconds, minimumDuration)
+        let clampedShutterSeconds = min(
+            max(values.shutterSeconds, minimumDuration),
+            maximumDuration
+        )
+
+        let exposureDuration = CMTime(
+            seconds: clampedShutterSeconds,
+            preferredTimescale: 1_000_000_000
+        )
+
+        device.setExposureModeCustom(
+            duration: exposureDuration,
+            iso: Float(clampedISO),
+            completionHandler: nil
+        )
+
+        return ExposureValues(
+            iso: clampedISO,
+            shutterSeconds: clampedShutterSeconds
+        )
+        #else
+        throw CaptureSessionError.backendFailure(
+            message: "Manual exposure controls are unavailable on this platform."
+        )
+        #endif
+    }
+
     private func configureSessionIfNeeded(for position: CaptureLensPosition) throws {
         guard !isConfigured else { return }
         try configureSession(for: position)
@@ -654,6 +1345,46 @@ public final class AVCaptureSessionBackend: CaptureSessionBackend {
         #endif
     }
 
+    private func captureMetadataSnapshot() -> CaptureTechnicalMetadata? {
+        guard let activeDevice = session.inputs.compactMap({ $0 as? AVCaptureDeviceInput }).first?.device else {
+            return nil
+        }
+
+        var iso: Double?
+        var shutterSeconds: Double?
+        var whiteBalanceMode: String?
+        var whiteBalanceTemperatureKelvin: Double?
+        var whiteBalanceTint: Double?
+
+        #if os(iOS) || targetEnvironment(macCatalyst)
+        iso = Double(activeDevice.iso)
+        shutterSeconds = activeDevice.exposureDuration.seconds
+        switch activeDevice.whiteBalanceMode {
+        case .autoWhiteBalance:
+            whiteBalanceMode = "auto"
+        case .continuousAutoWhiteBalance:
+            whiteBalanceMode = "continuous_auto"
+        case .locked:
+            whiteBalanceMode = "locked"
+        @unknown default:
+            whiteBalanceMode = "unknown"
+        }
+        let temperatureAndTint = activeDevice.temperatureAndTintValues(for: activeDevice.deviceWhiteBalanceGains)
+        whiteBalanceTemperatureKelvin = Double(temperatureAndTint.temperature)
+        whiteBalanceTint = Double(temperatureAndTint.tint)
+        #endif
+
+        let metadata = CaptureTechnicalMetadata(
+            lensModel: activeDevice.localizedName,
+            iso: iso,
+            shutterSeconds: shutterSeconds,
+            whiteBalanceMode: whiteBalanceMode,
+            whiteBalanceTemperatureKelvin: whiteBalanceTemperatureKelvin,
+            whiteBalanceTint: whiteBalanceTint
+        )
+        return metadata.isEmpty ? nil : metadata
+    }
+
     private func addInFlightCapture(_ processor: PhotoCaptureProcessor, id: UUID) {
         inFlightCaptureLock.withLock {
             inFlightCaptures[id] = processor
@@ -691,18 +1422,23 @@ private final class CaptureCompletionBox: @unchecked Sendable {
 #if canImport(AVFoundation)
 private final class PhotoCaptureProcessor: NSObject, AVCapturePhotoCaptureDelegate {
     private let requestedFormat: CapturePhotoFormat
+    private let metadataSnapshot: CaptureTechnicalMetadata?
     private let onComplete: (Result<CapturedPhotoPayload, Error>) -> Void
     private let lock = NSLock()
     private var hasCompleted = false
     private var processedData: Data?
     private var rawData: Data?
+    private var processedMetadata: CaptureTechnicalMetadata?
+    private var rawMetadata: CaptureTechnicalMetadata?
     private var processingError: Error?
 
     init(
         requestedFormat: CapturePhotoFormat,
+        metadataSnapshot: CaptureTechnicalMetadata?,
         onComplete: @escaping (Result<CapturedPhotoPayload, Error>) -> Void
     ) {
         self.requestedFormat = requestedFormat
+        self.metadataSnapshot = metadataSnapshot
         self.onComplete = onComplete
     }
 
@@ -723,14 +1459,26 @@ private final class PhotoCaptureProcessor: NSObject, AVCapturePhotoCaptureDelega
             }
             return
         }
+        let metadata: CaptureTechnicalMetadata?
+        #if os(macOS)
+        metadata = metadataSnapshot
+        #else
+        metadata = CaptureTechnicalMetadata.resolving(
+            photoMetadata: photo.metadata,
+            fallback: metadataSnapshot
+        )
+        #endif
         lock.withLock {
             #if os(macOS)
             processedData = data
+            processedMetadata = metadata
             #else
             if photo.isRawPhoto {
                 rawData = data
+                rawMetadata = metadata
             } else {
                 processedData = data
+                processedMetadata = metadata
             }
             #endif
         }
@@ -754,7 +1502,9 @@ private final class PhotoCaptureProcessor: NSObject, AVCapturePhotoCaptureDelega
 
             let payload = CapturedPhotoPayload(
                 processedData: processedData,
-                rawData: rawData
+                rawData: rawData,
+                processedMetadata: processedMetadata,
+                rawMetadata: rawMetadata
             )
 
             switch requestedFormat {
@@ -804,9 +1554,9 @@ private final class PhotoCaptureProcessor: NSObject, AVCapturePhotoCaptureDelega
 #endif
 
 private extension NSLock {
-    func withLock<T>(_ body: () -> T) -> T {
+    func withLock<T>(_ body: () throws -> T) rethrows -> T {
         lock()
         defer { unlock() }
-        return body()
+        return try body()
     }
 }

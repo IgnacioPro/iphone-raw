@@ -489,6 +489,18 @@ final class BootstrapViewModel: ObservableObject {
         lastCaptureError = nil
     }
 
+    func cycleCaptureFormat() {
+        guard case .ready = state else { return }
+        let allFormats: [CapturePhotoFormat] = [.processed, .raw, .appleProRAW]
+        let supported = allFormats.filter { isCaptureFormatSupported($0) }
+        guard let currentIndex = supported.firstIndex(of: selectedCaptureFormat) else {
+            selectCaptureFormat(.processed)
+            return
+        }
+        let nextIndex = (currentIndex + 1) % supported.count
+        selectCaptureFormat(supported[nextIndex])
+    }
+
     func applyExposureAuto() {
         guard case .ready = state else { return }
         do {

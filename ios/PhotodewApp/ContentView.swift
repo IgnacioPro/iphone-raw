@@ -22,6 +22,8 @@ private enum CaptureDesignTokens {
     static let shutterButtonInnerSize: CGFloat = 58
     static let thumbnailSize: CGFloat = 48
     static let thumbnailCornerRadius: CGFloat = 8
+    static let formatToggleHeight: CGFloat = 28
+    static let formatToggleCornerRadius: CGFloat = 6
     static let histogramWidth: CGFloat = 80
     static let histogramHeight: CGFloat = 32
     static let proControlsPanelMaxHeight: CGFloat = 340
@@ -214,9 +216,14 @@ struct ContentView: View {
             Spacer(minLength: 0)
 
             HStack {
-                // Left spacer — balances the thumbnail on the right
-                Color.clear
-                    .frame(width: CaptureDesignTokens.thumbnailSize, height: CaptureDesignTokens.thumbnailSize)
+                CaptureFormatToggleButton(
+                    selectedFormat: bootstrap.selectedCaptureFormat,
+                    action: {
+                        hapticLight()
+                        bootstrap.cycleCaptureFormat()
+                    }
+                )
+                .disabled(isInteractionDisabled)
 
                 Spacer()
 
@@ -1099,6 +1106,76 @@ private struct ShutterControlButton: View {
             .shadow(color: .black.opacity(0.35), radius: 10, x: 0, y: 3)
         }
         .buttonStyle(.plain)
+    }
+}
+
+// MARK: - Capture Format Toggle Button
+
+private struct CaptureFormatToggleButton: View {
+    let selectedFormat: CapturePhotoFormat
+    let action: @MainActor () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            Text(label)
+                .font(.system(size: 11, weight: .bold, design: .monospaced))
+                .foregroundStyle(foregroundColor)
+                .padding(.horizontal, 8)
+                .frame(height: CaptureDesignTokens.formatToggleHeight)
+                .background(
+                    RoundedRectangle(cornerRadius: CaptureDesignTokens.formatToggleCornerRadius)
+                        .fill(backgroundColor)
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: CaptureDesignTokens.formatToggleCornerRadius)
+                        .stroke(borderColor, lineWidth: 1)
+                )
+        }
+        .buttonStyle(.plain)
+        .frame(width: CaptureDesignTokens.thumbnailSize, height: CaptureDesignTokens.thumbnailSize)
+        .accessibilityLabel("Capture format")
+        .accessibilityValue(accessibilityValue)
+        .accessibilityHint("Cycles capture format")
+    }
+
+    private var label: String {
+        switch selectedFormat {
+        case .processed: return "JPG"
+        case .raw: return "RAW"
+        case .appleProRAW: return "PRO"
+        }
+    }
+
+    private var foregroundColor: Color {
+        switch selectedFormat {
+        case .processed: return .white.opacity(0.7)
+        case .raw: return .green
+        case .appleProRAW: return .orange
+        }
+    }
+
+    private var backgroundColor: Color {
+        switch selectedFormat {
+        case .processed: return .white.opacity(0.08)
+        case .raw: return .green.opacity(0.15)
+        case .appleProRAW: return .orange.opacity(0.15)
+        }
+    }
+
+    private var borderColor: Color {
+        switch selectedFormat {
+        case .processed: return .white.opacity(0.2)
+        case .raw: return .green.opacity(0.4)
+        case .appleProRAW: return .orange.opacity(0.4)
+        }
+    }
+
+    private var accessibilityValue: String {
+        switch selectedFormat {
+        case .processed: return "Processed"
+        case .raw: return "True RAW"
+        case .appleProRAW: return "Apple ProRAW"
+        }
     }
 }
 

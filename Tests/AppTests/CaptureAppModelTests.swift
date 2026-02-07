@@ -105,7 +105,9 @@ struct CaptureAppModelTests {
             capturedAt: capturedAt,
             lensPosition: .front,
             byteCount: 4_200,
-            captureFormat: .raw
+            captureFormat: .raw,
+            pairedLocalIdentifier: "E5F6-G7H8",
+            pairedByteCount: 2_100
         )
 
         let artifacts = await metadataStore.fetchAll()
@@ -123,6 +125,8 @@ struct CaptureAppModelTests {
         #expect(artifact.metadata["lens_position"] == "front")
         #expect(artifact.metadata["byte_count"] == "4200")
         #expect(artifact.metadata["capture_format"] == "raw")
+        #expect(artifact.metadata["paired_photo_library_local_identifier"] == "E5F6-G7H8")
+        #expect(artifact.metadata["paired_byte_count"] == "2100")
     }
 
     @Test("rawCaptureCapability exposes service capability state")

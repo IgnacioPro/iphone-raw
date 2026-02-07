@@ -113,6 +113,10 @@ public final class CaptureAppModel {
         try await sessionService.capturePhoto(format: format)
     }
 
+    public func capturePhotoPayload(format: CapturePhotoFormat) async throws -> CapturedPhotoPayload {
+        try await sessionService.capturePhotoPayload(format: format)
+    }
+
     public func currentLensPosition() -> CaptureLensPosition? {
         guard case let .running(position) = sessionService.state else {
             return nil
@@ -139,15 +143,23 @@ public final class CaptureAppModel {
         capturedAt: Date,
         lensPosition: CaptureLensPosition?,
         byteCount: Int,
-        captureFormat: CapturePhotoFormat
+        captureFormat: CapturePhotoFormat,
+        pairedLocalIdentifier: String? = nil,
+        pairedByteCount: Int? = nil
     ) async {
-        let metadata: [String: String] = [
+        var metadata: [String: String] = [
             "photo_library_local_identifier": localIdentifier,
             "captured_at": capturedAt.ISO8601Format(),
             "lens_position": lensPosition?.rawValue ?? "unknown",
             "byte_count": String(byteCount),
             "capture_format": captureFormat.rawValue,
         ]
+        if let pairedLocalIdentifier {
+            metadata["paired_photo_library_local_identifier"] = pairedLocalIdentifier
+        }
+        if let pairedByteCount {
+            metadata["paired_byte_count"] = String(pairedByteCount)
+        }
 
         let artifact = CaptureArtifact(
             createdAt: capturedAt,

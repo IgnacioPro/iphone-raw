@@ -111,20 +111,27 @@ final class BootstrapViewModel: ObservableObject {
         do {
             let lensPosition = model.currentLensPosition()
             let captureFormat: CapturePhotoFormat = isRawCaptureEnabled ? .raw : .processed
-            let data = try await model.capturePhotoData(format: captureFormat)
+            let capturePayload = try await model.capturePhotoPayload(format: captureFormat)
             setSaveToast(.saving)
-            let saveResult = try await cameraRollSaver.savePhotoData(data, format: captureFormat)
+            let saveResult = try await cameraRollSaver.saveCapturePayload(
+                capturePayload,
+                requestedFormat: captureFormat
+            )
             guard activeCaptureID == captureID else { return }
             let capturedAt = Date()
-            lastCaptureByteCount = data.count
+            let primaryByteCount = try capturePayload.primaryData(for: captureFormat).count
+            let pairedByteCount = capturePayload.secondaryData(for: captureFormat)?.count
+            lastCaptureByteCount = capturePayload.totalByteCount
             lastCaptureAt = capturedAt
             lastCaptureError = nil
             await model.persistPhotoLibraryCapture(
-                localIdentifier: saveResult.localIdentifier,
+                localIdentifier: saveResult.primaryLocalIdentifier,
                 capturedAt: capturedAt,
                 lensPosition: lensPosition,
-                byteCount: data.count,
-                captureFormat: captureFormat
+                byteCount: primaryByteCount,
+                captureFormat: captureFormat,
+                pairedLocalIdentifier: saveResult.pairedLocalIdentifier,
+                pairedByteCount: pairedByteCount
             )
             setSaveToast(.saved)
             scheduleSaveToastDismiss()
@@ -239,16 +246,23 @@ final class BootstrapViewModel: ObservableObject {
 }
 
 protocol CameraRollSaving: Sendable {
-    func savePhotoData(_ data: Data, format: CapturePhotoFormat) async throws -> CameraRollSaveResult
+    func saveCapturePayload(
+        _ payload: CapturedPhotoPayload,
+        requestedFormat: CapturePhotoFormat
+    ) async throws -> CameraRollSaveResult
 }
 
 struct CameraRollSaveResult: Sendable, Equatable {
-    let localIdentifier: String
+    let primaryLocalIdentifier: String
+    let pairedLocalIdentifier: String?
 }
 
 #if canImport(Photos)
 private struct SystemCameraRollSaver: CameraRollSaving {
-    func savePhotoData(_ data: Data, format: CapturePhotoFormat) async throws -> CameraRollSaveResult {
+    func saveCapturePayload(
+        _ payload: CapturedPhotoPayload,
+        requestedFormat: CapturePhotoFormat
+    ) async throws -> CameraRollSaveResult {
         let status = await authorizationStatus()
         switch status {
         case .authorized, .limited:
@@ -261,6 +275,62 @@ private struct SystemCameraRollSaver: CameraRollSaving {
             throw CameraRollSaveError.accessDenied
         }
 
+        switch requestedFormat {
+        case .processed:
+            guard let data = payload.processedData ?? payload.rawData else {
+                throw CameraRollSaveError.missingCaptureData
+            }
+            let localIdentifier = try await saveSingleAsset(data: data, format: .processed)
+            return CameraRollSaveResult(
+                primaryLocalIdentifier: localIdentifier,
+                pairedLocalIdentifier: nil
+            )
+
+        case .raw:
+            guard let rawData = payload.rawData else {
+                throw CameraRollSaveError.missingCaptureData
+            }
+            guard let processedData = payload.processedData else {
+                throw CameraRollSaveError.missingCaptureData
+            }
+
+            var rawLocalIdentifier: String?
+            var processedLocalIdentifier: String?
+
+            do {
+                try await PHPhotoLibrary.shared().performChanges { [rawData, processedData] in
+                    let rawRequest = PHAssetCreationRequest.forAsset()
+                    rawRequest.addResource(
+                        with: .photo,
+                        data: rawData,
+                        options: makeCreationOptions(format: .raw)
+                    )
+                    rawLocalIdentifier = rawRequest.placeholderForCreatedAsset?.localIdentifier
+
+                    let processedRequest = PHAssetCreationRequest.forAsset()
+                    processedRequest.addResource(
+                        with: .photo,
+                        data: processedData,
+                        options: makeCreationOptions(format: .processed)
+                    )
+                    processedLocalIdentifier = processedRequest.placeholderForCreatedAsset?.localIdentifier
+                }
+            } catch {
+                throw CameraRollSaveError.saveFailed
+            }
+
+            guard let rawLocalIdentifier, let processedLocalIdentifier else {
+                throw CameraRollSaveError.saveFailed
+            }
+
+            return CameraRollSaveResult(
+                primaryLocalIdentifier: rawLocalIdentifier,
+                pairedLocalIdentifier: processedLocalIdentifier
+            )
+        }
+    }
+
+    private func saveSingleAsset(data: Data, format: CapturePhotoFormat) async throws -> String {
         var localIdentifier: String?
         do {
             try await PHPhotoLibrary.shared().performChanges { [data] in
@@ -276,7 +346,7 @@ private struct SystemCameraRollSaver: CameraRollSaving {
             throw CameraRollSaveError.saveFailed
         }
 
-        return CameraRollSaveResult(localIdentifier: localIdentifier)
+        return localIdentifier
     }
 
     private func makeCreationOptions(format: CapturePhotoFormat) -> PHAssetResourceCreationOptions {
@@ -323,7 +393,10 @@ private struct SystemCameraRollSaver: CameraRollSaving {
 }
 #else
 private struct SystemCameraRollSaver: CameraRollSaving {
-    func savePhotoData(_ data: Data, format: CapturePhotoFormat) async throws -> CameraRollSaveResult {
+    func saveCapturePayload(
+        _ payload: CapturedPhotoPayload,
+        requestedFormat: CapturePhotoFormat
+    ) async throws -> CameraRollSaveResult {
         throw CameraRollSaveError.unavailable
     }
 }
@@ -333,6 +406,7 @@ private enum CameraRollSaveError: LocalizedError {
     case accessDenied
     case accessRestricted
     case saveFailed
+    case missingCaptureData
     case unavailable
 
     var errorDescription: String? {
@@ -343,6 +417,8 @@ private enum CameraRollSaveError: LocalizedError {
             "Photos access is restricted by system policy."
         case .saveFailed:
             "Could not save the photo to Photos."
+        case .missingCaptureData:
+            "Capture data was incomplete. Try capturing again."
         case .unavailable:
             "Saving to Photos is unavailable on this device."
         }

@@ -37,6 +37,41 @@ public enum CapturePhotoFormat: String, Equatable, Sendable {
     case raw
 }
 
+public struct CapturedPhotoPayload: Equatable, Sendable {
+    public let processedData: Data?
+    public let rawData: Data?
+
+    public init(processedData: Data? = nil, rawData: Data? = nil) {
+        self.processedData = processedData
+        self.rawData = rawData
+    }
+
+    public var totalByteCount: Int {
+        (processedData?.count ?? 0) + (rawData?.count ?? 0)
+    }
+
+    public func primaryData(for format: CapturePhotoFormat) throws -> Data {
+        switch format {
+        case .processed:
+            if let processedData { return processedData }
+            if let rawData { return rawData }
+        case .raw:
+            if let rawData { return rawData }
+            if let processedData { return processedData }
+        }
+        throw CaptureSessionError.backendFailure(message: "Photo capture finished without image data.")
+    }
+
+    public func secondaryData(for format: CapturePhotoFormat) -> Data? {
+        switch format {
+        case .processed:
+            return rawData
+        case .raw:
+            return processedData
+        }
+    }
+}
+
 public enum CaptureSessionError: Error, Equatable, LocalizedError {
     case cameraSwitchNotSupported
     case backendFailure(message: String)
@@ -68,6 +103,7 @@ public protocol CaptureSessionBackend {
     func switchCamera() throws -> CaptureLensPosition
     func capturePhoto() async throws -> Data
     func capturePhoto(format: CapturePhotoFormat) async throws -> Data
+    func capturePhotoPayload(format: CapturePhotoFormat) async throws -> CapturedPhotoPayload
     func rawCaptureCapability() -> RawCaptureCapability
 }
 
@@ -81,6 +117,7 @@ public protocol CaptureSessionServing {
     func switchCamera() throws
     func capturePhoto() async throws -> Data
     func capturePhoto(format: CapturePhotoFormat) async throws -> Data
+    func capturePhotoPayload(format: CapturePhotoFormat) async throws -> CapturedPhotoPayload
     func rawCaptureCapability() -> RawCaptureCapability
     func markInterrupted(reason: String)
 }
@@ -94,11 +131,31 @@ public extension CaptureSessionBackend {
             throw CaptureSessionError.rawCaptureNotSupported
         }
     }
+
+    func capturePhotoPayload(format: CapturePhotoFormat) async throws -> CapturedPhotoPayload {
+        let data = try await capturePhoto(format: format)
+        switch format {
+        case .processed:
+            return CapturedPhotoPayload(processedData: data)
+        case .raw:
+            return CapturedPhotoPayload(rawData: data)
+        }
+    }
 }
 
 public extension CaptureSessionServing {
     func capturePhoto() async throws -> Data {
         try await capturePhoto(format: .processed)
+    }
+
+    func capturePhotoPayload(format: CapturePhotoFormat) async throws -> CapturedPhotoPayload {
+        let data = try await capturePhoto(format: format)
+        switch format {
+        case .processed:
+            return CapturedPhotoPayload(processedData: data)
+        case .raw:
+            return CapturedPhotoPayload(rawData: data)
+        }
     }
 }
 
@@ -216,7 +273,8 @@ public final class CaptureSessionService: CaptureSessionServing {
 
     public func capturePhoto(format: CapturePhotoFormat) async throws -> Data {
         do {
-            let data = try await backend.capturePhoto(format: format)
+            let payload = try await capturePhotoPayload(format: format)
+            let data = try payload.primaryData(for: format)
             logger?.log(
                 CaptureEvent(
                     category: .capture,
@@ -242,6 +300,10 @@ public final class CaptureSessionService: CaptureSessionServing {
             )
             throw error
         }
+    }
+
+    public func capturePhotoPayload(format: CapturePhotoFormat) async throws -> CapturedPhotoPayload {
+        try await backend.capturePhotoPayload(format: format)
     }
 
     public func rawCaptureCapability() -> RawCaptureCapability {
@@ -356,6 +418,11 @@ public final class AVCaptureSessionBackend: CaptureSessionBackend {
     }
 
     public func capturePhoto(format: CapturePhotoFormat) async throws -> Data {
+        let payload = try await capturePhotoPayload(format: format)
+        return try payload.primaryData(for: format)
+    }
+
+    public func capturePhotoPayload(format: CapturePhotoFormat) async throws -> CapturedPhotoPayload {
         #if canImport(AVFoundation)
         guard isRunning, session.isRunning else {
             throw CaptureSessionError.backendFailure(message: "Capture session is not running.")
@@ -364,7 +431,7 @@ public final class AVCaptureSessionBackend: CaptureSessionBackend {
         return try await withCheckedThrowingContinuation { continuation in
             let completionBox = CaptureCompletionBox(continuation: continuation)
             let captureID = UUID()
-            let processor = PhotoCaptureProcessor { [weak self] result in
+            let processor = PhotoCaptureProcessor(requestedFormat: format) { [weak self] result in
                 self?.removeInFlightCapture(captureID)
                 completionBox.resume(with: result)
             }
@@ -487,6 +554,13 @@ public final class AVCaptureSessionBackend: CaptureSessionBackend {
             throw CaptureSessionError.rawCaptureNotSupported
         }
 
+        let processedCodec = preferredProcessedCodec()
+        guard let processedCodec else {
+            throw CaptureSessionError.backendFailure(
+                message: "RAW capture requires a processed codec for RAW+processed pair output."
+            )
+        }
+
         if let connection = photoOutput.connection(with: .video),
            connection.videoScaleAndCropFactor != 1.0 {
             throw CaptureSessionError.backendFailure(
@@ -501,12 +575,22 @@ public final class AVCaptureSessionBackend: CaptureSessionBackend {
             )
         }
 
-        let settings = AVCapturePhotoSettings(rawPixelFormatType: rawPixelFormatType)
+        let settings = AVCapturePhotoSettings(
+            rawPixelFormatType: rawPixelFormatType,
+            processedFormat: [AVVideoCodecKey: processedCodec]
+        )
         settings.photoQualityPrioritization = .speed
         settings.flashMode = .off
         settings.isHighResolutionPhotoEnabled = false
         return settings
         #endif
+    }
+
+    private func preferredProcessedCodec() -> AVVideoCodecType? {
+        if photoOutput.availablePhotoCodecTypes.contains(.jpeg) {
+            return .jpeg
+        }
+        return photoOutput.availablePhotoCodecTypes.first
     }
 
     private func addInFlightCapture(_ processor: PhotoCaptureProcessor, id: UUID) {
@@ -526,13 +610,13 @@ public final class AVCaptureSessionBackend: CaptureSessionBackend {
 #if canImport(AVFoundation)
 private final class CaptureCompletionBox: @unchecked Sendable {
     private let lock = NSLock()
-    private var continuation: CheckedContinuation<Data, Error>?
+    private var continuation: CheckedContinuation<CapturedPhotoPayload, Error>?
 
-    init(continuation: CheckedContinuation<Data, Error>) {
+    init(continuation: CheckedContinuation<CapturedPhotoPayload, Error>) {
         self.continuation = continuation
     }
 
-    func resume(with result: Result<Data, Error>) {
+    func resume(with result: Result<CapturedPhotoPayload, Error>) {
         let capturedContinuation = lock.withLock {
             let continuation = continuation
             self.continuation = nil
@@ -545,13 +629,19 @@ private final class CaptureCompletionBox: @unchecked Sendable {
 
 #if canImport(AVFoundation)
 private final class PhotoCaptureProcessor: NSObject, AVCapturePhotoCaptureDelegate {
-    private let onComplete: (Result<Data, Error>) -> Void
+    private let requestedFormat: CapturePhotoFormat
+    private let onComplete: (Result<CapturedPhotoPayload, Error>) -> Void
     private let lock = NSLock()
     private var hasCompleted = false
     private var processedData: Data?
+    private var rawData: Data?
     private var processingError: Error?
 
-    init(onComplete: @escaping (Result<Data, Error>) -> Void) {
+    init(
+        requestedFormat: CapturePhotoFormat,
+        onComplete: @escaping (Result<CapturedPhotoPayload, Error>) -> Void
+    ) {
+        self.requestedFormat = requestedFormat
         self.onComplete = onComplete
     }
 
@@ -561,14 +651,28 @@ private final class PhotoCaptureProcessor: NSObject, AVCapturePhotoCaptureDelega
         error: Error?
     ) {
         if let error {
-            processingError = error
+            lock.withLock {
+                processingError = error
+            }
             return
         }
         guard let data = photo.fileDataRepresentation() else {
-            processingError = CaptureSessionError.backendFailure(message: "Failed to produce photo data.")
+            lock.withLock {
+                processingError = CaptureSessionError.backendFailure(message: "Failed to produce photo data.")
+            }
             return
         }
-        processedData = data
+        lock.withLock {
+            #if os(macOS)
+            processedData = data
+            #else
+            if photo.isRawPhoto {
+                rawData = data
+            } else {
+                processedData = data
+            }
+            #endif
+        }
     }
 
     func photoOutput(
@@ -580,18 +684,51 @@ private final class PhotoCaptureProcessor: NSObject, AVCapturePhotoCaptureDelega
             completeOnce(.failure(CaptureSessionError.backendFailure(message: error.localizedDescription)))
             return
         }
-        if let processingError {
-            completeOnce(.failure(CaptureSessionError.backendFailure(message: processingError.localizedDescription)))
-            return
+        let result = lock.withLock { () -> Result<CapturedPhotoPayload, Error> in
+            if let processingError {
+                return .failure(
+                    CaptureSessionError.backendFailure(message: processingError.localizedDescription)
+                )
+            }
+
+            let payload = CapturedPhotoPayload(
+                processedData: processedData,
+                rawData: rawData
+            )
+
+            switch requestedFormat {
+            case .processed:
+                guard payload.processedData != nil else {
+                    return .failure(
+                        CaptureSessionError.backendFailure(
+                            message: "Photo capture finished without processed image data."
+                        )
+                    )
+                }
+            case .raw:
+                guard payload.rawData != nil else {
+                    return .failure(
+                        CaptureSessionError.backendFailure(
+                            message: "Photo capture finished without RAW image data."
+                        )
+                    )
+                }
+                guard payload.processedData != nil else {
+                    return .failure(
+                        CaptureSessionError.backendFailure(
+                            message: "RAW capture finished without processed pair image data."
+                        )
+                    )
+                }
+            }
+
+            return .success(payload)
         }
-        guard let processedData else {
-            completeOnce(.failure(CaptureSessionError.backendFailure(message: "Photo capture finished without image data.")))
-            return
-        }
-        completeOnce(.success(processedData))
+
+        completeOnce(result)
     }
 
-    private func completeOnce(_ result: Result<Data, Error>) {
+    private func completeOnce(_ result: Result<CapturedPhotoPayload, Error>) {
         let shouldComplete = lock.withLock {
             if hasCompleted {
                 return false

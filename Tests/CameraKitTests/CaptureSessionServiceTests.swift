@@ -64,6 +64,25 @@ struct CaptureSessionServiceTests {
         #expect(logger.events.contains(where: { $0.action == "photo_capture_succeeded" }))
     }
 
+    @Test("raw capture exposes RAW and processed pair payload")
+    func rawCapturePayload() async throws {
+        let backend = StubCaptureBackend(
+            capturePayload: CapturedPhotoPayload(
+                processedData: Data([0x10, 0x20]),
+                rawData: Data([0xAA, 0xBB, 0xCC])
+            )
+        )
+        let service = CaptureSessionService(backend: backend)
+        try service.start()
+
+        let payload = try await service.capturePhotoPayload(format: .raw)
+        let primaryData = try await service.capturePhoto(format: .raw)
+
+        #expect(payload.rawData == Data([0xAA, 0xBB, 0xCC]))
+        #expect(payload.processedData == Data([0x10, 0x20]))
+        #expect(primaryData == Data([0xAA, 0xBB, 0xCC]))
+    }
+
     @Test("capturePhoto logs failure when backend throws")
     func capturePhotoFailure() async {
         let backend = StubCaptureBackend(shouldFailCapture: true)
@@ -99,6 +118,7 @@ private final class StubCaptureBackend: CaptureSessionBackend {
     private let shouldFailSwitch: Bool
     private let shouldFailCapture: Bool
     private let captureData: Data
+    private let capturePayload: CapturedPhotoPayload?
     private let rawCapability: RawCaptureCapability
 
     init(
@@ -106,6 +126,7 @@ private final class StubCaptureBackend: CaptureSessionBackend {
         shouldFailSwitch: Bool = false,
         shouldFailCapture: Bool = false,
         captureData: Data = Data([0xFF, 0xD8, 0xFF, 0xD9]),
+        capturePayload: CapturedPhotoPayload? = nil,
         rawCapability: RawCaptureCapability = RawCaptureCapability(
             isSupported: false,
             availableRawPhotoPixelFormatTypes: []
@@ -115,6 +136,7 @@ private final class StubCaptureBackend: CaptureSessionBackend {
         self.shouldFailSwitch = shouldFailSwitch
         self.shouldFailCapture = shouldFailCapture
         self.captureData = captureData
+        self.capturePayload = capturePayload
         self.rawCapability = rawCapability
     }
 
@@ -148,6 +170,22 @@ private final class StubCaptureBackend: CaptureSessionBackend {
             throw CaptureSessionError.backendFailure(message: "capture failed")
         }
         return captureData
+    }
+
+    func capturePhotoPayload(format: CapturePhotoFormat) async throws -> CapturedPhotoPayload {
+        if shouldFailCapture {
+            throw CaptureSessionError.backendFailure(message: "capture failed")
+        }
+        if let capturePayload {
+            return capturePayload
+        }
+
+        switch format {
+        case .processed:
+            return CapturedPhotoPayload(processedData: captureData)
+        case .raw:
+            return CapturedPhotoPayload(rawData: captureData)
+        }
     }
 
     func rawCaptureCapability() -> RawCaptureCapability {

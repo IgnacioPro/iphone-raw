@@ -19,7 +19,7 @@ Confirm users can quickly understand True RAW vs Apple ProRAW vs processed mode 
 3. Verify copy clearly states:
    - True RAW (DNG) is minimal processing and best for heavy edits.
    - Apple ProRAW is partially processed computational RAW.
-   - Apple ProRAW is not yet available in Photodew.
+   - Apple ProRAW is scene-referred but not sensor Bayer RAW.
    - Processed mode is faster/smaller for sharing.
 4. Toggle RAW mode on/off and confirm the primary mode line updates correctly.
 

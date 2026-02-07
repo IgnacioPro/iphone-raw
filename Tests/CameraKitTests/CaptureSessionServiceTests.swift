@@ -132,6 +132,54 @@ struct CaptureSessionServiceTests {
         #expect(successEvent.payload["total_bytes"] == "5")
     }
 
+    @Test("apple pro raw capture exposes RAW primary payload")
+    func appleProRAWCapturePayload() async throws {
+        let processedMetadata = CaptureTechnicalMetadata(
+            lensModel: "Back Wide Camera",
+            iso: 200,
+            shutterSeconds: 0.01,
+            whiteBalanceMode: "auto",
+            whiteBalanceTemperatureKelvin: 5_200,
+            whiteBalanceTint: 0
+        )
+        let rawMetadata = CaptureTechnicalMetadata(
+            lensModel: "Back Wide Camera",
+            iso: 125,
+            shutterSeconds: 0.016,
+            whiteBalanceMode: "locked",
+            whiteBalanceTemperatureKelvin: 5_000,
+            whiteBalanceTint: -2
+        )
+        let backend = StubCaptureBackend(
+            capturePayload: CapturedPhotoPayload(
+                processedData: Data([0x01, 0x02]),
+                rawData: Data([0xA1, 0xB2, 0xC3]),
+                processedMetadata: processedMetadata,
+                rawMetadata: rawMetadata
+            )
+        )
+        let logger = InMemoryCaptureEventLogger()
+        let service = CaptureSessionService(backend: backend, logger: logger)
+        try service.start()
+
+        let payload = try await service.capturePhotoPayload(format: .appleProRAW)
+        let primaryData = try await service.capturePhoto(format: .appleProRAW)
+
+        #expect(payload.rawData == Data([0xA1, 0xB2, 0xC3]))
+        #expect(payload.processedData == Data([0x01, 0x02]))
+        #expect(primaryData == Data([0xA1, 0xB2, 0xC3]))
+        #expect(payload.primaryMetadata(for: .appleProRAW) == rawMetadata)
+        #expect(payload.secondaryMetadata(for: .appleProRAW) == processedMetadata)
+        guard let successEvent = logger.events.last(where: { $0.action == "photo_capture_succeeded" }) else {
+            Issue.record("Expected Apple ProRAW capture success telemetry event.")
+            return
+        }
+        #expect(successEvent.payload["format"] == "appleProRAW")
+        #expect(successEvent.payload["bytes"] == "3")
+        #expect(successEvent.payload["paired_bytes"] == "2")
+        #expect(successEvent.payload["total_bytes"] == "5")
+    }
+
     @Test("capturePhoto logs failure when backend throws")
     func capturePhotoFailure() async {
         let backend = StubCaptureBackend(shouldFailCapture: true)
@@ -166,7 +214,9 @@ struct CaptureSessionServiceTests {
     func rawCaptureCapability() {
         let expected = RawCaptureCapability(
             isSupported: true,
-            availableRawPhotoPixelFormatTypes: [875_704_422]
+            availableRawPhotoPixelFormatTypes: [875_704_422],
+            isAppleProRAWSupported: true,
+            availableAppleProRAWPhotoPixelFormatTypes: [875_704_430]
         )
         let backend = StubCaptureBackend(rawCapability: expected)
         let service = CaptureSessionService(backend: backend)
@@ -600,6 +650,11 @@ private final class StubCaptureBackend: CaptureSessionBackend {
                 processedMetadata: resolvedMetadata
             )
         case .raw:
+            return CapturedPhotoPayload(
+                rawData: captureData,
+                rawMetadata: resolvedMetadata
+            )
+        case .appleProRAW:
             return CapturedPhotoPayload(
                 rawData: captureData,
                 rawMetadata: resolvedMetadata

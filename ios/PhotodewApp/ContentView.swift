@@ -1,4 +1,5 @@
 import CaptureUI
+import CameraKit
 import Foundation
 import SwiftUI
 #if canImport(AVFoundation)
@@ -89,13 +90,21 @@ struct ContentView: View {
                     }
 
                     HStack(spacing: 12) {
-                        Button(bootstrap.isRawCaptureEnabled ? "RAW Capture: On" : "RAW Capture: Off") {
-                            bootstrap.toggleRawCaptureMode()
-                        }
-                        .buttonStyle(.bordered)
-                        .tint(bootstrap.isRawCaptureEnabled ? .green : nil)
-                        .disabled(!bootstrap.rawCaptureCapability.isSupported || bootstrap.isCapturingPhoto || bootstrap.isRecoveringSession)
-                        .frame(maxWidth: .infinity)
+                        modeSelectionButton(
+                            title: "Processed",
+                            format: .processed,
+                            tint: .blue
+                        )
+                        modeSelectionButton(
+                            title: "True RAW",
+                            format: .raw,
+                            tint: .green
+                        )
+                        modeSelectionButton(
+                            title: "Apple ProRAW",
+                            format: .appleProRAW,
+                            tint: .orange
+                        )
                     }
 
                     Button(areAdvancedControlsExpanded ? "Hide Controls" : "Show Controls") {
@@ -298,7 +307,7 @@ struct ContentView: View {
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .disabled(bootstrap.isCapturingPhoto || bootstrap.isRecoveringSession)
 
-                        Text("Mode: \(bootstrap.isRawCaptureEnabled ? "RAW (DNG)" : "Processed")")
+                        Text("Mode: \(captureFormatTitle(bootstrap.selectedCaptureFormat))")
                             .font(.footnote)
                             .foregroundStyle(.secondary)
 
@@ -311,7 +320,7 @@ struct ContentView: View {
                                 .font(.footnote)
                                 .foregroundStyle(.secondary)
 
-                            Text("Apple ProRAW is partially processed computational RAW and is not yet available in Photodew.")
+                            Text("Apple ProRAW is partially processed computational RAW and remains scene-referred, but it is not sensor Bayer RAW.")
                                 .font(.footnote)
                                 .foregroundStyle(.secondary)
 
@@ -340,6 +349,17 @@ struct ContentView: View {
 
                     if let rawCapabilityReason = rawCapabilityReason {
                         Text(rawCapabilityReason)
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                            .multilineTextAlignment(.center)
+                    }
+
+                    Text(appleProRAWCapabilityHeadline)
+                        .font(.footnote.weight(.semibold))
+                        .foregroundStyle(bootstrap.rawCaptureCapability.isAppleProRAWSupported ? .green : .yellow)
+
+                    if let appleProRAWCapabilityReason = appleProRAWCapabilityReason {
+                        Text(appleProRAWCapabilityReason)
                             .font(.footnote)
                             .foregroundStyle(.secondary)
                             .multilineTextAlignment(.center)
@@ -426,13 +446,53 @@ struct ContentView: View {
         return "Shutter"
     }
 
+    @ViewBuilder
+    private func modeSelectionButton(
+        title: String,
+        format: CapturePhotoFormat,
+        tint: Color
+    ) -> some View {
+        let isSelected = bootstrap.selectedCaptureFormat == format
+        let isSupported = isCaptureFormatSupported(format)
+        Button(title) {
+            bootstrap.selectCaptureFormat(format)
+        }
+        .buttonStyle(.bordered)
+        .tint(isSelected ? tint : nil)
+        .opacity(isSupported || format == .processed ? 1.0 : 0.7)
+        .disabled(bootstrap.isCapturingPhoto || bootstrap.isRecoveringSession)
+        .frame(maxWidth: .infinity)
+    }
+
+    private func captureFormatTitle(_ format: CapturePhotoFormat) -> String {
+        switch format {
+        case .processed:
+            return "Processed"
+        case .raw:
+            return "True RAW (DNG)"
+        case .appleProRAW:
+            return "Apple ProRAW (DNG)"
+        }
+    }
+
+    private func isCaptureFormatSupported(_ format: CapturePhotoFormat) -> Bool {
+        switch format {
+        case .processed:
+            return true
+        case .raw:
+            return bootstrap.rawCaptureCapability.isSupported
+        case .appleProRAW:
+            return bootstrap.rawCaptureCapability.isAppleProRAWSupported
+        }
+    }
+
     private var rawCapabilityHeadline: String {
         let formatCount = bootstrap.rawCaptureCapability.availableRawPhotoPixelFormatTypes.count
         if bootstrap.rawCaptureCapability.isSupported {
-            return "RAW: Supported (\(formatCount) format\(formatCount == 1 ? "" : "s"))"
+            return "True RAW: Supported (\(formatCount) format\(formatCount == 1 ? "" : "s"))"
         }
 
-        return "RAW: Unavailable"
+        return "True RAW: Unavailable"
     }
 
     private var rawCapabilityReason: String? {
@@ -440,12 +500,29 @@ struct ContentView: View {
         return bootstrap.rawCaptureCapability.reason
     }
 
-    private var modeGuidePrimaryLine: String {
-        if bootstrap.isRawCaptureEnabled {
-            return "True RAW (DNG): minimal processing capture path for maximum edit latitude."
+    private var appleProRAWCapabilityHeadline: String {
+        let formatCount = bootstrap.rawCaptureCapability.availableAppleProRAWPhotoPixelFormatTypes.count
+        if bootstrap.rawCaptureCapability.isAppleProRAWSupported {
+            return "Apple ProRAW: Supported (\(formatCount) format\(formatCount == 1 ? "" : "s"))"
         }
 
-        return "Current mode: Processed capture for convenience and speed."
+        return "Apple ProRAW: Unavailable"
+    }
+
+    private var appleProRAWCapabilityReason: String? {
+        guard !bootstrap.rawCaptureCapability.isAppleProRAWSupported else { return nil }
+        return bootstrap.rawCaptureCapability.appleProRAWReason
+    }
+
+    private var modeGuidePrimaryLine: String {
+        switch bootstrap.selectedCaptureFormat {
+        case .processed:
+            return "Current mode: Processed capture for convenience and speed."
+        case .raw:
+            return "True RAW (DNG): minimal processing capture path for maximum edit latitude."
+        case .appleProRAW:
+            return "Apple ProRAW (DNG): partially processed computational RAW for higher convenience."
+        }
     }
 
     private var exposureModeLine: String {

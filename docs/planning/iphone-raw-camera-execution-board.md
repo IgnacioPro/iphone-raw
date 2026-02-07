@@ -12,7 +12,7 @@ Planning horizon: 2026-02-09 through 2026-06-05
 | M0 Foundation | Complete | `FND-001` to `FND-005` are implemented and covered by package tests and CI workflow. |
 | M1 Camera MVP | Complete | `CAM-001` through `CAM-006` are implemented; interruption recovery and retry UX were validated on device. |
 | M2 Manual Controls | Complete | `MAN-001` through `MAN-006` are implemented in code and accepted on device. |
-| M3 True RAW | Complete (ahead of schedule) | `RAW-001` to `RAW-006` and `RAW-008` are complete with user-validated on-device behavior. |
+| M3 True RAW | Complete (ahead of schedule) | `RAW-001` to `RAW-008` are implemented and accepted on device. |
 | M4 to M7 | Not started | No changes yet in Pro UX, render pipeline, and release workstreams. |
 
 ### Ticket Status (Implemented / In Progress / Next)
@@ -36,7 +36,7 @@ Planning horizon: 2026-02-09 through 2026-06-05
 | MAN-004 | Done (accepted) | White balance temperature/tint state machine (`/Users/ignacio/Code/photodew/Sources/CameraKit/WhiteBalanceStateMachine.swift`), backend apply/reset in `/Users/ignacio/Code/photodew/Sources/CameraKit/CaptureSessionService.swift`, app model passthrough in `/Users/ignacio/Code/photodew/Sources/App/CaptureAppModel.swift`, and iOS controls in `/Users/ignacio/Code/photodew/ios/PhotodewApp/ContentView.swift` are implemented with tests in `/Users/ignacio/Code/photodew/Tests/CameraKitTests/CaptureSessionServiceTests.swift` and `/Users/ignacio/Code/photodew/Tests/CameraKitTests/WhiteBalanceStateMachineTests.swift`; user validated on device. | None |
 | MAN-005 | Done (accepted) | EV compensation is implemented via backend/service API (`/Users/ignacio/Code/photodew/Sources/CameraKit/CaptureSessionService.swift`), app model passthrough (`/Users/ignacio/Code/photodew/Sources/App/CaptureAppModel.swift`), and iOS slider/actions (`/Users/ignacio/Code/photodew/ios/PhotodewApp/PhotodewIOSApp.swift`, `/Users/ignacio/Code/photodew/ios/PhotodewApp/ContentView.swift`) with coverage in `/Users/ignacio/Code/photodew/Tests/CameraKitTests/CaptureSessionServiceTests.swift` and `/Users/ignacio/Code/photodew/Tests/AppTests/CaptureAppModelTests.swift`; user validated on device. | None |
 | MAN-006 | Done (accepted) | Preset slot/domain persistence and default UserDefaults store are implemented in `/Users/ignacio/Code/photodew/Sources/App/CaptureControlPreset.swift`; save/apply app-model wiring is in `/Users/ignacio/Code/photodew/Sources/App/CaptureAppModel.swift`; iOS preset controls are implemented in `/Users/ignacio/Code/photodew/ios/PhotodewApp/PhotodewIOSApp.swift` and `/Users/ignacio/Code/photodew/ios/PhotodewApp/ContentView.swift`; coverage is in `/Users/ignacio/Code/photodew/Tests/AppTests/CaptureAppModelTests.swift` and `/Users/ignacio/Code/photodew/Tests/AppTests/CaptureControlPresetStoreTests.swift`; user validated on device. | None |
-| RAW-007 | Not started | Optional Apple ProRAW mode is scoped in the execution board but not implemented yet. | Define product/UX constraints and implementation slices before starting. |
+| RAW-007 | Done (accepted) | Apple ProRAW capture format (`appleProRAW`) is implemented in `/Users/ignacio/Code/photodew/Sources/CameraKit/CaptureSessionService.swift`; mode selection UI and save path are implemented in `/Users/ignacio/Code/photodew/ios/PhotodewApp/ContentView.swift` and `/Users/ignacio/Code/photodew/ios/PhotodewApp/PhotodewIOSApp.swift`; coverage is in `/Users/ignacio/Code/photodew/Tests/CameraKitTests/CaptureSessionServiceTests.swift`; user validated on device. | None |
 | RAW-001 | Done | RAW capability detection and gating wired from backend to UI. | None |
 | RAW-002 | Done | True RAW capture path generates DNG on supported device. | None |
 | RAW-003 | Done | RAW+processed payload capture and dual Photos save implemented. | None |
@@ -47,8 +47,8 @@ Planning horizon: 2026-02-09 through 2026-06-05
 
 ### Immediate Next Sequence
 
-1. Start `RAW-007` optional Apple ProRAW mode scope and implementation.
-2. Draft a small RAW-007 on-device validation checklist before coding.
+1. Start `UX-001` realtime luminance histogram implementation slice.
+2. Draft a compact `UX-001` on-device validation checklist before coding overlays.
 
 ### Known Device Console Noise
 

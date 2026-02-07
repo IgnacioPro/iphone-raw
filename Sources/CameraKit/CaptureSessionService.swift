@@ -20,21 +20,31 @@ public struct RawCaptureCapability: Equatable, Sendable {
     public let isSupported: Bool
     public let availableRawPhotoPixelFormatTypes: [UInt32]
     public let reason: String?
+    public let isAppleProRAWSupported: Bool
+    public let availableAppleProRAWPhotoPixelFormatTypes: [UInt32]
+    public let appleProRAWReason: String?
 
     public init(
         isSupported: Bool,
         availableRawPhotoPixelFormatTypes: [UInt32],
-        reason: String? = nil
+        reason: String? = nil,
+        isAppleProRAWSupported: Bool = false,
+        availableAppleProRAWPhotoPixelFormatTypes: [UInt32] = [],
+        appleProRAWReason: String? = nil
     ) {
         self.isSupported = isSupported
         self.availableRawPhotoPixelFormatTypes = availableRawPhotoPixelFormatTypes
         self.reason = reason
+        self.isAppleProRAWSupported = isAppleProRAWSupported
+        self.availableAppleProRAWPhotoPixelFormatTypes = availableAppleProRAWPhotoPixelFormatTypes
+        self.appleProRAWReason = appleProRAWReason
     }
 }
 
 public enum CapturePhotoFormat: String, Equatable, Sendable {
     case processed
     case raw
+    case appleProRAW
 }
 
 public struct CapturedPhotoPayload: Equatable, Sendable {
@@ -67,6 +77,9 @@ public struct CapturedPhotoPayload: Equatable, Sendable {
         case .raw:
             if let rawData { return rawData }
             if let processedData { return processedData }
+        case .appleProRAW:
+            if let rawData { return rawData }
+            if let processedData { return processedData }
         }
         throw CaptureSessionError.backendFailure(message: "Photo capture finished without image data.")
     }
@@ -77,6 +90,8 @@ public struct CapturedPhotoPayload: Equatable, Sendable {
             return rawData
         case .raw:
             return processedData
+        case .appleProRAW:
+            return processedData
         }
     }
 
@@ -85,6 +100,8 @@ public struct CapturedPhotoPayload: Equatable, Sendable {
         case .processed:
             return processedMetadata ?? rawMetadata
         case .raw:
+            return rawMetadata ?? processedMetadata
+        case .appleProRAW:
             return rawMetadata ?? processedMetadata
         }
     }
@@ -95,6 +112,8 @@ public struct CapturedPhotoPayload: Equatable, Sendable {
             return rawMetadata
         case .raw:
             return processedMetadata
+        case .appleProRAW:
+            return processedMetadata
         }
     }
 }
@@ -104,6 +123,7 @@ public enum CaptureSessionError: Error, Equatable, LocalizedError {
     case backendFailure(message: String)
     case captureTimedOut
     case rawCaptureNotSupported
+    case appleProRAWCaptureNotSupported
 
     public var errorDescription: String? {
         switch self {
@@ -115,6 +135,8 @@ public enum CaptureSessionError: Error, Equatable, LocalizedError {
             return "Camera capture timed out."
         case .rawCaptureNotSupported:
             return "RAW capture is not supported for the current camera configuration."
+        case .appleProRAWCaptureNotSupported:
+            return "Apple ProRAW capture is not supported for the current camera configuration."
         }
     }
 }
@@ -175,6 +197,8 @@ public extension CaptureSessionBackend {
             return try await capturePhoto()
         case .raw:
             throw CaptureSessionError.rawCaptureNotSupported
+        case .appleProRAW:
+            throw CaptureSessionError.appleProRAWCaptureNotSupported
         }
     }
 
@@ -184,6 +208,8 @@ public extension CaptureSessionBackend {
         case .processed:
             return CapturedPhotoPayload(processedData: data)
         case .raw:
+            return CapturedPhotoPayload(rawData: data)
+        case .appleProRAW:
             return CapturedPhotoPayload(rawData: data)
         }
     }
@@ -220,6 +246,8 @@ public extension CaptureSessionServing {
         case .processed:
             return CapturedPhotoPayload(processedData: data)
         case .raw:
+            return CapturedPhotoPayload(rawData: data)
+        case .appleProRAW:
             return CapturedPhotoPayload(rawData: data)
         }
     }
@@ -890,11 +918,25 @@ public final class AVCaptureSessionBackend: CaptureSessionBackend {
             )
         }
 
-        let formatTypes: [UInt32] = photoOutput.availableRawPhotoPixelFormatTypes.map { UInt32($0) }
+        #if os(iOS) || targetEnvironment(macCatalyst) || os(tvOS)
+        let bayerFormatTypes: [UInt32] = photoOutput.availableRawPhotoPixelFormatTypes
+            .filter { AVCapturePhotoOutput.isBayerRAWPixelFormat($0) }
+            .map { UInt32($0) }
+        let appleProRAWFormatTypes: [UInt32] = photoOutput.availableRawPhotoPixelFormatTypes
+            .filter { AVCapturePhotoOutput.isAppleProRAWPixelFormat($0) }
+            .map { UInt32($0) }
+        #else
+        let bayerFormatTypes: [UInt32] = photoOutput.availableRawPhotoPixelFormatTypes.map { UInt32($0) }
+        let appleProRAWFormatTypes: [UInt32] = []
+        #endif
+
         return RawCaptureCapability(
-            isSupported: !formatTypes.isEmpty,
-            availableRawPhotoPixelFormatTypes: formatTypes,
-            reason: formatTypes.isEmpty ? "No RAW pixel formats are available for the active camera configuration." : nil
+            isSupported: !bayerFormatTypes.isEmpty,
+            availableRawPhotoPixelFormatTypes: bayerFormatTypes,
+            reason: bayerFormatTypes.isEmpty ? "No Bayer RAW pixel formats are available for the active camera configuration." : nil,
+            isAppleProRAWSupported: !appleProRAWFormatTypes.isEmpty,
+            availableAppleProRAWPhotoPixelFormatTypes: appleProRAWFormatTypes,
+            appleProRAWReason: appleProRAWFormatTypes.isEmpty ? "No Apple ProRAW pixel formats are available for the active camera configuration." : nil
         )
         #else
         return RawCaptureCapability(
@@ -1209,6 +1251,11 @@ public final class AVCaptureSessionBackend: CaptureSessionBackend {
             }
             session.addOutput(photoOutput)
         }
+        #if os(iOS) || targetEnvironment(macCatalyst) || os(tvOS)
+        if photoOutput.isAppleProRAWSupported, !photoOutput.isAppleProRAWEnabled {
+            photoOutput.isAppleProRAWEnabled = true
+        }
+        #endif
         isConfigured = true
     }
 
@@ -1223,6 +1270,8 @@ public final class AVCaptureSessionBackend: CaptureSessionBackend {
             return makeProcessedPhotoSettings()
         case .raw:
             return try makeRawPhotoSettings()
+        case .appleProRAW:
+            return try makeAppleProRAWPhotoSettings()
         }
     }
 
@@ -1241,7 +1290,7 @@ public final class AVCaptureSessionBackend: CaptureSessionBackend {
         #if os(macOS)
         throw CaptureSessionError.rawCaptureNotSupported
         #else
-        guard let rawPixelFormatType = photoOutput.availableRawPhotoPixelFormatTypes.first else {
+        guard let rawPixelFormatType = preferredBayerRawPixelFormatType() else {
             throw CaptureSessionError.rawCaptureNotSupported
         }
 
@@ -1254,7 +1303,7 @@ public final class AVCaptureSessionBackend: CaptureSessionBackend {
 
         try enforceRawSafetyPolicy()
 
-        let rawFileType = preferredRawFileType()
+        let rawFileType = preferredRawFileType(for: rawPixelFormatType)
         let processedFileType = preferredProcessedFileType()
         let settings: AVCapturePhotoSettings
         if let rawFileType {
@@ -1277,6 +1326,64 @@ public final class AVCaptureSessionBackend: CaptureSessionBackend {
         #endif
     }
 
+    private func makeAppleProRAWPhotoSettings() throws -> AVCapturePhotoSettings {
+        #if os(macOS)
+        throw CaptureSessionError.appleProRAWCaptureNotSupported
+        #else
+        guard let rawPixelFormatType = preferredAppleProRAWPixelFormatType() else {
+            throw CaptureSessionError.appleProRAWCaptureNotSupported
+        }
+
+        let processedCodec = preferredProcessedCodec()
+        guard let processedCodec else {
+            throw CaptureSessionError.backendFailure(
+                message: "Apple ProRAW capture requires a processed codec for paired output."
+            )
+        }
+
+        let rawFileType = preferredRawFileType(for: rawPixelFormatType)
+        let processedFileType = preferredProcessedFileType()
+        let settings: AVCapturePhotoSettings
+        if let rawFileType {
+            settings = AVCapturePhotoSettings(
+                rawPixelFormatType: rawPixelFormatType,
+                rawFileType: rawFileType,
+                processedFormat: [AVVideoCodecKey: processedCodec],
+                processedFileType: processedFileType
+            )
+        } else {
+            settings = AVCapturePhotoSettings(
+                rawPixelFormatType: rawPixelFormatType,
+                processedFormat: [AVVideoCodecKey: processedCodec]
+            )
+        }
+        settings.photoQualityPrioritization = .balanced
+        settings.flashMode = .off
+        settings.isHighResolutionPhotoEnabled = false
+        return settings
+        #endif
+    }
+
+    private func preferredBayerRawPixelFormatType() -> OSType? {
+        #if os(iOS) || targetEnvironment(macCatalyst) || os(tvOS)
+        return photoOutput.availableRawPhotoPixelFormatTypes.first {
+            AVCapturePhotoOutput.isBayerRAWPixelFormat($0)
+        }
+        #else
+        return photoOutput.availableRawPhotoPixelFormatTypes.first
+        #endif
+    }
+
+    private func preferredAppleProRAWPixelFormatType() -> OSType? {
+        #if os(iOS) || targetEnvironment(macCatalyst) || os(tvOS)
+        return photoOutput.availableRawPhotoPixelFormatTypes.first {
+            AVCapturePhotoOutput.isAppleProRAWPixelFormat($0)
+        }
+        #else
+        return nil
+        #endif
+    }
+
     private func preferredProcessedCodec() -> AVVideoCodecType? {
         if photoOutput.availablePhotoCodecTypes.contains(.jpeg) {
             return .jpeg
@@ -1284,15 +1391,22 @@ public final class AVCaptureSessionBackend: CaptureSessionBackend {
         return photoOutput.availablePhotoCodecTypes.first
     }
 
-    private func preferredRawFileType() -> AVFileType? {
+    private func preferredRawFileType(for rawPixelFormatType: OSType) -> AVFileType? {
         #if os(macOS)
         return nil
         #else
         let dngType = AVFileType(rawValue: "com.adobe.raw-image")
-        if photoOutput.availableRawPhotoFileTypes.contains(dngType) {
+        if photoOutput.availableRawPhotoFileTypes.contains(dngType),
+           photoOutput.supportedRawPhotoPixelFormatTypes(for: dngType).contains(rawPixelFormatType) {
             return dngType
         }
-        return photoOutput.availableRawPhotoFileTypes.first
+        for fileType in photoOutput.availableRawPhotoFileTypes {
+            let supportedFormats = photoOutput.supportedRawPhotoPixelFormatTypes(for: fileType)
+            if supportedFormats.contains(rawPixelFormatType) {
+                return fileType
+            }
+        }
+        return nil
         #endif
     }
 
@@ -1528,6 +1642,14 @@ private final class PhotoCaptureProcessor: NSObject, AVCapturePhotoCaptureDelega
                     return .failure(
                         CaptureSessionError.backendFailure(
                             message: "RAW capture finished without processed pair image data."
+                        )
+                    )
+                }
+            case .appleProRAW:
+                guard payload.rawData != nil else {
+                    return .failure(
+                        CaptureSessionError.backendFailure(
+                            message: "Apple ProRAW capture finished without RAW image data."
                         )
                     )
                 }

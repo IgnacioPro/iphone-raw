@@ -49,7 +49,7 @@ final class BootstrapViewModel: ObservableObject {
     @Published private(set) var lastCaptureAt: Date?
     @Published private(set) var lastCaptureError: String?
     @Published private(set) var saveToast: SaveToastState?
-    @Published private(set) var isRawCaptureEnabled = false
+    @Published private(set) var selectedCaptureFormat: CapturePhotoFormat = .processed
     @Published private(set) var storagePressureWarning: String?
     @Published private(set) var isCleaningRecentCapture = false
     @Published private(set) var exposureState: ExposureControlState = .auto
@@ -115,8 +115,12 @@ final class BootstrapViewModel: ObservableObject {
         rawCaptureCapability = RawCaptureCapability(
             isSupported: false,
             availableRawPhotoPixelFormatTypes: [],
-            reason: "RAW capability checks require a physical iPhone camera."
+            reason: "RAW capability checks require a physical iPhone camera.",
+            isAppleProRAWSupported: false,
+            availableAppleProRAWPhotoPixelFormatTypes: [],
+            appleProRAWReason: "Apple ProRAW capability checks require a physical iPhone camera."
         )
+        selectedCaptureFormat = .processed
         return
         #else
         await model.bootstrap()
@@ -137,8 +141,12 @@ final class BootstrapViewModel: ObservableObject {
         rawCaptureCapability = RawCaptureCapability(
             isSupported: false,
             availableRawPhotoPixelFormatTypes: [],
-            reason: "RAW capability is unavailable until the camera session is running."
+            reason: "RAW capability is unavailable until the camera session is running.",
+            isAppleProRAWSupported: false,
+            availableAppleProRAWPhotoPixelFormatTypes: [],
+            appleProRAWReason: "Apple ProRAW capability is unavailable until the camera session is running."
         )
+        selectedCaptureFormat = .processed
         exposureState = .auto
         exposureCompensation = 0
         exposureCompensationRange = -2...2
@@ -180,7 +188,7 @@ final class BootstrapViewModel: ObservableObject {
 
         do {
             let lensPosition = model.currentLensPosition()
-            let captureFormat: CapturePhotoFormat = isRawCaptureEnabled ? .raw : .processed
+            let captureFormat = selectedCaptureFormat
             let capturePayload = try await model.capturePhotoPayload(format: captureFormat)
             setSaveToast(.saving)
             let saveResult = try await cameraRollSaver.saveCapturePayload(
@@ -190,9 +198,10 @@ final class BootstrapViewModel: ObservableObject {
             guard activeCaptureID == captureID else { return }
             let capturedAt = Date()
             let primaryByteCount = try capturePayload.primaryData(for: captureFormat).count
-            let pairedByteCount = capturePayload.secondaryData(for: captureFormat)?.count
+            let pairedLocalIdentifier = saveResult.pairedLocalIdentifier
+            let pairedByteCount = pairedLocalIdentifier == nil ? nil : capturePayload.secondaryData(for: captureFormat)?.count
             let primaryCaptureMetadata = capturePayload.primaryMetadata(for: captureFormat)
-            let pairedCaptureMetadata = capturePayload.secondaryMetadata(for: captureFormat)
+            let pairedCaptureMetadata = pairedLocalIdentifier == nil ? nil : capturePayload.secondaryMetadata(for: captureFormat)
             lastSavedLocalIdentifiers = saveResult.localIdentifiers
             lastCaptureByteCount = capturePayload.totalByteCount
             lastCaptureAt = capturedAt
@@ -203,7 +212,7 @@ final class BootstrapViewModel: ObservableObject {
                 lensPosition: lensPosition,
                 byteCount: primaryByteCount,
                 captureFormat: captureFormat,
-                pairedLocalIdentifier: saveResult.pairedLocalIdentifier,
+                pairedLocalIdentifier: pairedLocalIdentifier,
                 pairedByteCount: pairedByteCount,
                 captureMetadata: primaryCaptureMetadata,
                 pairedCaptureMetadata: pairedCaptureMetadata
@@ -275,15 +284,16 @@ final class BootstrapViewModel: ObservableObject {
         }
     }
 
-    func toggleRawCaptureMode() {
-        guard rawCaptureCapability.isSupported else {
-            isRawCaptureEnabled = false
-            if let reason = rawCaptureCapability.reason {
+    func selectCaptureFormat(_ format: CapturePhotoFormat) {
+        guard case .ready = state else { return }
+        guard isCaptureFormatSupported(format) else {
+            selectedCaptureFormat = .processed
+            if let reason = captureFormatUnavailableReason(for: format) {
                 lastCaptureError = reason
             }
             return
         }
-        isRawCaptureEnabled.toggle()
+        selectedCaptureFormat = format
         lastCaptureError = nil
     }
 
@@ -484,6 +494,8 @@ final class BootstrapViewModel: ObservableObject {
                 return "Camera switch is not available on this device."
             case .rawCaptureNotSupported:
                 return "RAW capture is not available for the current camera configuration."
+            case .appleProRAWCaptureNotSupported:
+                return "Apple ProRAW capture is not available for the current camera configuration."
             }
         }
 
@@ -518,15 +530,43 @@ final class BootstrapViewModel: ObservableObject {
             rawCaptureCapability = RawCaptureCapability(
                 isSupported: false,
                 availableRawPhotoPixelFormatTypes: [],
-                reason: "RAW capability is unavailable until the camera session is running."
+                reason: "RAW capability is unavailable until the camera session is running.",
+                isAppleProRAWSupported: false,
+                availableAppleProRAWPhotoPixelFormatTypes: [],
+                appleProRAWReason: "Apple ProRAW capability is unavailable until the camera session is running."
             )
-            isRawCaptureEnabled = false
+            selectedCaptureFormat = .processed
             return
         }
         rawCaptureCapability = model.rawCaptureCapability()
-        if !rawCaptureCapability.isSupported {
-            isRawCaptureEnabled = false
+        sanitizeSelectedCaptureFormat()
+    }
+
+    private func isCaptureFormatSupported(_ format: CapturePhotoFormat) -> Bool {
+        switch format {
+        case .processed:
+            return true
+        case .raw:
+            return rawCaptureCapability.isSupported
+        case .appleProRAW:
+            return rawCaptureCapability.isAppleProRAWSupported
         }
+    }
+
+    private func captureFormatUnavailableReason(for format: CapturePhotoFormat) -> String? {
+        switch format {
+        case .processed:
+            return nil
+        case .raw:
+            return rawCaptureCapability.reason
+        case .appleProRAW:
+            return rawCaptureCapability.appleProRAWReason
+        }
+    }
+
+    private func sanitizeSelectedCaptureFormat() {
+        guard !isCaptureFormatSupported(selectedCaptureFormat) else { return }
+        selectedCaptureFormat = .processed
     }
 
     private func refreshExposureState() {
@@ -623,7 +663,7 @@ final class BootstrapViewModel: ObservableObject {
 
         if availableBytes <= Self.lowStorageThresholdBytes {
             let availableText = ByteCountFormatter.string(fromByteCount: availableBytes, countStyle: .file)
-            storagePressureWarning = "Low storage: \(availableText) available. RAW captures may fail. Clean recent captures if needed."
+            storagePressureWarning = "Low storage: \(availableText) available. RAW and Apple ProRAW captures may fail. Clean recent captures if needed."
             return
         }
 
@@ -869,6 +909,15 @@ private struct SystemCameraRollSaver: CameraRollSaving {
                 primaryLocalIdentifier: rawLocalIdentifier,
                 pairedLocalIdentifier: processedLocalIdentifier
             )
+        case .appleProRAW:
+            guard let rawData = payload.rawData else {
+                throw CameraRollSaveError.missingCaptureData
+            }
+            let localIdentifier = try await saveSingleAsset(data: rawData, format: .appleProRAW)
+            return CameraRollSaveResult(
+                primaryLocalIdentifier: localIdentifier,
+                pairedLocalIdentifier: nil
+            )
         }
     }
 
@@ -907,6 +956,15 @@ private struct SystemCameraRollSaver: CameraRollSaving {
             #endif
         case .raw:
             options.originalFilename = "Photodew-\(timestamp).dng"
+            #if canImport(UniformTypeIdentifiers)
+            if #available(iOS 26, *) {
+                options.contentType = .dng
+            } else {
+                options.uniformTypeIdentifier = "com.adobe.raw-image"
+            }
+            #endif
+        case .appleProRAW:
+            options.originalFilename = "Photodew-\(timestamp)-pro.dng"
             #if canImport(UniformTypeIdentifiers)
             if #available(iOS 26, *) {
                 options.contentType = .dng

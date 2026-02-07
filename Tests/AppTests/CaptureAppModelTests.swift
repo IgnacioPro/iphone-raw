@@ -194,6 +194,41 @@ struct CaptureAppModelTests {
         #expect(artifact.metadata["paired_capture_white_balance_tint"] == "-3.0")
     }
 
+    @Test("persistPhotoLibraryCapture stores Apple ProRAW capture format")
+    func persistPhotoLibraryCaptureAppleProRAWFormat() async {
+        let permissionClient = StubPermissionClient(status: .authorized, requestAccessResult: true)
+        let sessionBackend = StubCaptureBackend()
+        let sessionService = CaptureSessionService(backend: sessionBackend)
+        let gate = CameraPermissionGate(client: permissionClient)
+        let metadataStore = InMemoryCaptureMetadataStore()
+        let model = CaptureAppModel(
+            permissionGate: gate,
+            sessionService: sessionService,
+            metadataStore: metadataStore
+        )
+
+        await model.bootstrap()
+        let capturedAt = Date(timeIntervalSince1970: 1_234_567_892)
+        await model.persistPhotoLibraryCapture(
+            localIdentifier: "PRORAW-PRIMARY",
+            capturedAt: capturedAt,
+            lensPosition: .back,
+            byteCount: 9_001,
+            captureFormat: .appleProRAW
+        )
+
+        let artifacts = await metadataStore.fetchAll()
+        #expect(artifacts.count == 1)
+        guard let artifact = artifacts.first else {
+            Issue.record("Expected one persisted Apple ProRAW artifact.")
+            return
+        }
+
+        #expect(artifact.metadata["capture_format"] == "appleProRAW")
+        #expect(artifact.metadata["paired_photo_library_local_identifier"] == nil)
+        #expect(artifact.metadata["paired_byte_count"] == nil)
+    }
+
     @Test("rawCaptureCapability exposes service capability state")
     func rawCaptureCapability() async {
         let permissionClient = StubPermissionClient(status: .authorized, requestAccessResult: true)

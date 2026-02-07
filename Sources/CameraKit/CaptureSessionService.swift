@@ -561,24 +561,24 @@ public final class AVCaptureSessionBackend: CaptureSessionBackend {
             )
         }
 
-        if let connection = photoOutput.connection(with: .video),
-           connection.videoScaleAndCropFactor != 1.0 {
-            throw CaptureSessionError.backendFailure(
-                message: "RAW capture requires zoom factor 1.0. Reset zoom before capturing RAW."
+        try enforceRawSafetyPolicy()
+
+        let rawFileType = preferredRawFileType()
+        let processedFileType = preferredProcessedFileType()
+        let settings: AVCapturePhotoSettings
+        if let rawFileType {
+            settings = AVCapturePhotoSettings(
+                rawPixelFormatType: rawPixelFormatType,
+                rawFileType: rawFileType,
+                processedFormat: [AVVideoCodecKey: processedCodec],
+                processedFileType: processedFileType
+            )
+        } else {
+            settings = AVCapturePhotoSettings(
+                rawPixelFormatType: rawPixelFormatType,
+                processedFormat: [AVVideoCodecKey: processedCodec]
             )
         }
-
-        if let activeDeviceInput = session.inputs.compactMap({ $0 as? AVCaptureDeviceInput }).first,
-           activeDeviceInput.device.videoZoomFactor != 1.0 {
-            throw CaptureSessionError.backendFailure(
-                message: "RAW capture requires camera zoom factor 1.0."
-            )
-        }
-
-        let settings = AVCapturePhotoSettings(
-            rawPixelFormatType: rawPixelFormatType,
-            processedFormat: [AVVideoCodecKey: processedCodec]
-        )
         settings.photoQualityPrioritization = .speed
         settings.flashMode = .off
         settings.isHighResolutionPhotoEnabled = false
@@ -591,6 +591,67 @@ public final class AVCaptureSessionBackend: CaptureSessionBackend {
             return .jpeg
         }
         return photoOutput.availablePhotoCodecTypes.first
+    }
+
+    private func preferredRawFileType() -> AVFileType? {
+        #if os(macOS)
+        return nil
+        #else
+        let dngType = AVFileType(rawValue: "com.adobe.raw-image")
+        if photoOutput.availableRawPhotoFileTypes.contains(dngType) {
+            return dngType
+        }
+        return photoOutput.availableRawPhotoFileTypes.first
+        #endif
+    }
+
+    private func preferredProcessedFileType() -> AVFileType? {
+        let jpegType = AVFileType(rawValue: "public.jpeg")
+        if photoOutput.availablePhotoFileTypes.contains(jpegType) {
+            return jpegType
+        }
+        return photoOutput.availablePhotoFileTypes.first
+    }
+
+    private func enforceRawSafetyPolicy() throws {
+        #if os(macOS)
+        throw CaptureSessionError.rawCaptureNotSupported
+        #else
+        if let connection = photoOutput.connection(with: .video),
+           connection.videoScaleAndCropFactor != 1.0 {
+            connection.videoScaleAndCropFactor = 1.0
+        }
+
+        if let activeDeviceInput = session.inputs.compactMap({ $0 as? AVCaptureDeviceInput }).first {
+            let device = activeDeviceInput.device
+            if device.videoZoomFactor != 1.0 {
+                do {
+                    try device.lockForConfiguration()
+                    defer { device.unlockForConfiguration() }
+                    let clampedZoom = min(max(1.0, device.minAvailableVideoZoomFactor), device.maxAvailableVideoZoomFactor)
+                    device.videoZoomFactor = clampedZoom
+                } catch {
+                    throw CaptureSessionError.backendFailure(
+                        message: "RAW capture requires zoom factor 1.0, and the camera could not reset zoom automatically."
+                    )
+                }
+            }
+        }
+
+        if let connection = photoOutput.connection(with: .video),
+           connection.videoScaleAndCropFactor != 1.0 {
+            throw CaptureSessionError.backendFailure(
+                message: "RAW capture requires zoom factor 1.0."
+            )
+        }
+
+        if let activeDeviceInput = session.inputs.compactMap({ $0 as? AVCaptureDeviceInput }).first,
+           activeDeviceInput.device.videoZoomFactor != 1.0 {
+            throw CaptureSessionError.backendFailure(
+                message: "RAW capture requires camera zoom factor 1.0."
+            )
+        }
+        #endif
     }
 
     private func addInFlightCapture(_ processor: PhotoCaptureProcessor, id: UUID) {

@@ -82,6 +82,33 @@ public final class CaptureAppModel {
         sessionService.stop()
     }
 
+    public func resumeSessionIfNeeded() {
+        guard case .ready = bootState else { return }
+
+        do {
+            try sessionService.start()
+            bootState = .ready
+        } catch {
+            let message = String(describing: error)
+            bootState = .failed(reason: message)
+            logger?.log(
+                CaptureEvent(
+                    category: .system,
+                    action: "app_session_resume_failed",
+                    payload: ["error": message]
+                )
+            )
+        }
+    }
+
+    public func switchCamera() throws {
+        try sessionService.switchCamera()
+    }
+
+    public func capturePhotoData() async throws -> Data {
+        try await sessionService.capturePhoto()
+    }
+
     #if canImport(AVFoundation)
     public var previewSession: AVCaptureSession? {
         sessionService.previewSession

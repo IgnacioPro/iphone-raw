@@ -16,9 +16,21 @@ public enum CaptureSessionState: Equatable {
     case failed(message: String)
 }
 
-public enum CaptureSessionError: Error, Equatable {
+public enum CaptureSessionError: Error, Equatable, LocalizedError {
     case cameraSwitchNotSupported
     case backendFailure(message: String)
+    case captureTimedOut
+
+    public var errorDescription: String? {
+        switch self {
+        case .cameraSwitchNotSupported:
+            return "Camera switch is not supported on this device."
+        case let .backendFailure(message):
+            return message
+        case .captureTimedOut:
+            return "Camera capture timed out."
+        }
+    }
 }
 
 public protocol CaptureSessionBackend {
@@ -30,6 +42,7 @@ public protocol CaptureSessionBackend {
     func startRunning() throws
     func stopRunning()
     func switchCamera() throws -> CaptureLensPosition
+    func capturePhoto() async throws -> Data
 }
 
 public protocol CaptureSessionServing {
@@ -40,6 +53,7 @@ public protocol CaptureSessionServing {
     func start() throws
     func stop()
     func switchCamera() throws
+    func capturePhoto() async throws -> Data
     func markInterrupted(reason: String)
 }
 
@@ -150,6 +164,30 @@ public final class CaptureSessionService: CaptureSessionServing {
             )
         )
     }
+
+    public func capturePhoto() async throws -> Data {
+        do {
+            let data = try await backend.capturePhoto()
+            logger?.log(
+                CaptureEvent(
+                    category: .capture,
+                    action: "photo_capture_succeeded",
+                    payload: ["bytes": "\(data.count)"]
+                )
+            )
+            return data
+        } catch {
+            let message = String(describing: error)
+            logger?.log(
+                CaptureEvent(
+                    category: .capture,
+                    action: "photo_capture_failed",
+                    payload: ["error": message]
+                )
+            )
+            throw error
+        }
+    }
 }
 
 public final class SimulatedCaptureSessionBackend: CaptureSessionBackend {
@@ -178,12 +216,20 @@ public final class SimulatedCaptureSessionBackend: CaptureSessionBackend {
         activeLensPosition = activeLensPosition == .back ? .front : .back
         return activeLensPosition
     }
+
+    public func capturePhoto() async throws -> Data {
+        // Small synthetic JPEG marker payload to keep simulator/test flows deterministic.
+        Data([0xFF, 0xD8, 0xFF, 0xD9])
+    }
 }
 
 public final class AVCaptureSessionBackend: CaptureSessionBackend {
     #if canImport(AVFoundation)
     private let session: AVCaptureSession
+    private let photoOutput: AVCapturePhotoOutput
     private var isConfigured = false
+    private let inFlightCaptureLock = NSLock()
+    private var inFlightCaptures: [UUID: PhotoCaptureProcessor] = [:]
     #endif
 
     public private(set) var isRunning = false
@@ -193,6 +239,7 @@ public final class AVCaptureSessionBackend: CaptureSessionBackend {
         self.activeLensPosition = initialPosition
         #if canImport(AVFoundation)
         self.session = AVCaptureSession()
+        self.photoOutput = AVCapturePhotoOutput()
         #endif
     }
 
@@ -237,6 +284,32 @@ public final class AVCaptureSessionBackend: CaptureSessionBackend {
         return activeLensPosition
     }
 
+    public func capturePhoto() async throws -> Data {
+        #if canImport(AVFoundation)
+        guard isRunning, session.isRunning else {
+            throw CaptureSessionError.backendFailure(message: "Capture session is not running.")
+        }
+
+        return try await withCheckedThrowingContinuation { continuation in
+            let completionBox = CaptureCompletionBox(continuation: continuation)
+            let captureID = UUID()
+            let processor = PhotoCaptureProcessor { [weak self] result in
+                self?.removeInFlightCapture(captureID)
+                completionBox.resume(with: result)
+            }
+            addInFlightCapture(processor, id: captureID)
+            photoOutput.capturePhoto(with: makePhotoSettings(), delegate: processor)
+
+            Task {
+                try? await Task.sleep(for: .seconds(12))
+                completionBox.resume(with: .failure(CaptureSessionError.captureTimedOut))
+            }
+        }
+        #else
+        throw CaptureSessionError.backendFailure(message: "Photo capture is unavailable on this platform.")
+        #endif
+    }
+
     #if canImport(AVFoundation)
     private func configureSessionIfNeeded(for position: CaptureLensPosition) throws {
         guard !isConfigured else { return }
@@ -268,6 +341,12 @@ public final class AVCaptureSessionBackend: CaptureSessionBackend {
         }
 
         session.addInput(input)
+        if !session.outputs.contains(where: { $0 === photoOutput }) {
+            guard session.canAddOutput(photoOutput) else {
+                throw CaptureSessionError.backendFailure(message: "Cannot add photo output to capture session.")
+            }
+            session.addOutput(photoOutput)
+        }
         isConfigured = true
     }
 
@@ -275,8 +354,109 @@ public final class AVCaptureSessionBackend: CaptureSessionBackend {
         let avPosition: AVCaptureDevice.Position = position == .back ? .back : .front
         return AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: avPosition)
     }
+
+    private func makePhotoSettings() -> AVCapturePhotoSettings {
+        if photoOutput.availablePhotoCodecTypes.contains(.jpeg) {
+            return AVCapturePhotoSettings(format: [AVVideoCodecKey: AVVideoCodecType.jpeg])
+        }
+        return AVCapturePhotoSettings()
+    }
+
+    private func addInFlightCapture(_ processor: PhotoCaptureProcessor, id: UUID) {
+        inFlightCaptureLock.withLock {
+            inFlightCaptures[id] = processor
+        }
+    }
+
+    private func removeInFlightCapture(_ id: UUID) {
+        inFlightCaptureLock.withLock {
+            inFlightCaptures[id] = nil
+        }
+    }
     #endif
 }
+
+#if canImport(AVFoundation)
+private final class CaptureCompletionBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var continuation: CheckedContinuation<Data, Error>?
+
+    init(continuation: CheckedContinuation<Data, Error>) {
+        self.continuation = continuation
+    }
+
+    func resume(with result: Result<Data, Error>) {
+        let capturedContinuation = lock.withLock {
+            let continuation = continuation
+            self.continuation = nil
+            return continuation
+        }
+        capturedContinuation?.resume(with: result)
+    }
+}
+#endif
+
+#if canImport(AVFoundation)
+private final class PhotoCaptureProcessor: NSObject, AVCapturePhotoCaptureDelegate {
+    private let onComplete: (Result<Data, Error>) -> Void
+    private let lock = NSLock()
+    private var hasCompleted = false
+    private var processedData: Data?
+    private var processingError: Error?
+
+    init(onComplete: @escaping (Result<Data, Error>) -> Void) {
+        self.onComplete = onComplete
+    }
+
+    func photoOutput(
+        _ output: AVCapturePhotoOutput,
+        didFinishProcessingPhoto photo: AVCapturePhoto,
+        error: Error?
+    ) {
+        if let error {
+            processingError = error
+            return
+        }
+        guard let data = photo.fileDataRepresentation() else {
+            processingError = CaptureSessionError.backendFailure(message: "Failed to produce photo data.")
+            return
+        }
+        processedData = data
+    }
+
+    func photoOutput(
+        _ output: AVCapturePhotoOutput,
+        didFinishCaptureFor resolvedSettings: AVCaptureResolvedPhotoSettings,
+        error: Error?
+    ) {
+        if let error {
+            completeOnce(.failure(CaptureSessionError.backendFailure(message: error.localizedDescription)))
+            return
+        }
+        if let processingError {
+            completeOnce(.failure(CaptureSessionError.backendFailure(message: processingError.localizedDescription)))
+            return
+        }
+        guard let processedData else {
+            completeOnce(.failure(CaptureSessionError.backendFailure(message: "Photo capture finished without image data.")))
+            return
+        }
+        completeOnce(.success(processedData))
+    }
+
+    private func completeOnce(_ result: Result<Data, Error>) {
+        let shouldComplete = lock.withLock {
+            if hasCompleted {
+                return false
+            }
+            hasCompleted = true
+            return true
+        }
+        guard shouldComplete else { return }
+        onComplete(result)
+    }
+}
+#endif
 
 private extension NSLock {
     func withLock<T>(_ body: () -> T) -> T {

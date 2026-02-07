@@ -50,6 +50,33 @@ struct CaptureSessionServiceTests {
         #expect(message.contains("startup failed"))
         #expect(logger.events.contains(where: { $0.action == "session_start_failed" }))
     }
+
+    @Test("capturePhoto returns bytes and logs success")
+    func capturePhotoSuccess() async throws {
+        let backend = StubCaptureBackend(captureData: Data([0x01, 0x02, 0x03]))
+        let logger = InMemoryCaptureEventLogger()
+        let service = CaptureSessionService(backend: backend, logger: logger)
+        try service.start()
+
+        let data = try await service.capturePhoto()
+
+        #expect(data == Data([0x01, 0x02, 0x03]))
+        #expect(logger.events.contains(where: { $0.action == "photo_capture_succeeded" }))
+    }
+
+    @Test("capturePhoto logs failure when backend throws")
+    func capturePhotoFailure() async {
+        let backend = StubCaptureBackend(shouldFailCapture: true)
+        let logger = InMemoryCaptureEventLogger()
+        let service = CaptureSessionService(backend: backend, logger: logger)
+        try? service.start()
+
+        await #expect(throws: CaptureSessionError.self) {
+            _ = try await service.capturePhoto()
+        }
+
+        #expect(logger.events.contains(where: { $0.action == "photo_capture_failed" }))
+    }
 }
 
 private final class StubCaptureBackend: CaptureSessionBackend {
@@ -58,10 +85,19 @@ private final class StubCaptureBackend: CaptureSessionBackend {
 
     private let shouldFailStart: Bool
     private let shouldFailSwitch: Bool
+    private let shouldFailCapture: Bool
+    private let captureData: Data
 
-    init(shouldFailStart: Bool = false, shouldFailSwitch: Bool = false) {
+    init(
+        shouldFailStart: Bool = false,
+        shouldFailSwitch: Bool = false,
+        shouldFailCapture: Bool = false,
+        captureData: Data = Data([0xFF, 0xD8, 0xFF, 0xD9])
+    ) {
         self.shouldFailStart = shouldFailStart
         self.shouldFailSwitch = shouldFailSwitch
+        self.shouldFailCapture = shouldFailCapture
+        self.captureData = captureData
     }
 
     #if canImport(AVFoundation)
@@ -87,5 +123,12 @@ private final class StubCaptureBackend: CaptureSessionBackend {
         }
         activeLensPosition = activeLensPosition == .back ? .front : .back
         return activeLensPosition
+    }
+
+    func capturePhoto() async throws -> Data {
+        if shouldFailCapture {
+            throw CaptureSessionError.backendFailure(message: "capture failed")
+        }
+        return captureData
     }
 }

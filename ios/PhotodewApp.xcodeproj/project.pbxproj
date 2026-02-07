@@ -214,6 +214,7 @@
 				DEVELOPMENT_TEAM = CCJV95L9S3;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_NSCameraUsageDescription = "Photodew needs camera access to capture photos.";
+				INFOPLIST_KEY_NSPhotoLibraryAddUsageDescription = "Photodew needs Photos access to save captured photos.";
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
 				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
 				LD_RUNPATH_SEARCH_PATHS = (
@@ -316,6 +317,7 @@
 				DEVELOPMENT_TEAM = CCJV95L9S3;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_NSCameraUsageDescription = "Photodew needs camera access to capture photos.";
+				INFOPLIST_KEY_NSPhotoLibraryAddUsageDescription = "Photodew needs Photos access to save captured photos.";
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
 				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
 				LD_RUNPATH_SEARCH_PATHS = (

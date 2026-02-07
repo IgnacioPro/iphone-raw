@@ -46,6 +46,44 @@ struct CaptureAppModelTests {
         }
         #expect(reason.contains("denied"))
     }
+
+    @Test("capturePhotoData returns bytes from session service")
+    func capturePhotoData() async throws {
+        let permissionClient = StubPermissionClient(status: .authorized, requestAccessResult: true)
+        let sessionBackend = StubCaptureBackend(captureData: Data([0xAA, 0xBB]))
+        let sessionService = CaptureSessionService(backend: sessionBackend)
+        let gate = CameraPermissionGate(client: permissionClient)
+        let model = CaptureAppModel(
+            permissionGate: gate,
+            sessionService: sessionService,
+            metadataStore: InMemoryCaptureMetadataStore()
+        )
+
+        await model.bootstrap()
+        let data = try await model.capturePhotoData()
+
+        #expect(data == Data([0xAA, 0xBB]))
+    }
+
+    @Test("resumeSessionIfNeeded restarts a stopped ready session")
+    func resumeSessionIfNeeded() async {
+        let permissionClient = StubPermissionClient(status: .authorized, requestAccessResult: true)
+        let sessionBackend = StubCaptureBackend()
+        let sessionService = CaptureSessionService(backend: sessionBackend)
+        let gate = CameraPermissionGate(client: permissionClient)
+        let model = CaptureAppModel(
+            permissionGate: gate,
+            sessionService: sessionService,
+            metadataStore: InMemoryCaptureMetadataStore()
+        )
+
+        await model.bootstrap()
+        model.stopSession()
+        model.resumeSessionIfNeeded()
+
+        #expect(model.bootState == .ready)
+        #expect(sessionBackend.isRunning)
+    }
 }
 
 private final class StubPermissionClient: CameraPermissionClient {
@@ -69,6 +107,11 @@ private final class StubPermissionClient: CameraPermissionClient {
 private final class StubCaptureBackend: CaptureSessionBackend {
     private(set) var isRunning: Bool = false
     private(set) var activeLensPosition: CaptureLensPosition = .back
+    private let captureData: Data
+
+    init(captureData: Data = Data([0xFF, 0xD8, 0xFF, 0xD9])) {
+        self.captureData = captureData
+    }
 
     #if canImport(AVFoundation)
     var previewSession: AVCaptureSession? {
@@ -87,5 +130,9 @@ private final class StubCaptureBackend: CaptureSessionBackend {
     func switchCamera() throws -> CaptureLensPosition {
         activeLensPosition = activeLensPosition == .back ? .front : .back
         return activeLensPosition
+    }
+
+    func capturePhoto() async throws -> Data {
+        captureData
     }
 }

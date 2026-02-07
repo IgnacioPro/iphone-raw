@@ -1,7 +1,54 @@
 # Photodew iPhone RAW Camera Execution Board
 
-Last updated: 2026-02-06
+Last updated: 2026-02-07
 Planning horizon: 2026-02-09 through 2026-06-05
+
+## 0) Current Status Snapshot (as of 2026-02-07)
+
+### Milestone Progress
+
+| Milestone | Status | Notes |
+| --- | --- | --- |
+| M0 Foundation | Complete | `FND-001` to `FND-005` are implemented and covered by package tests and CI workflow. |
+| M1 Camera MVP | In progress | `CAM-001`, `CAM-002`, `CAM-003` complete; `CAM-004` and `CAM-006` are partially covered and need explicit device validation; `CAM-005` not started. |
+| M2 Manual Controls | Not started | No manual ISO/shutter/focus/WB/EV controls yet. |
+| M3 True RAW | In progress (ahead of schedule) | `RAW-001` to `RAW-004` implemented on device, including DNG capture, RAW+processed pair save, and RAW-safe policy enforcement. |
+| M4 to M7 | Not started | No changes yet in Pro UX, render pipeline, and release workstreams. |
+
+### Ticket Status (Implemented / In Progress / Next)
+
+| Ticket | Status | Evidence in Repo | Next Action |
+| --- | --- | --- | --- |
+| FND-001 | Done | Swift package modules present in `Sources/` and `Package.swift`. | None |
+| FND-002 | Done | Permission gate + blocked state in `Sources/CameraKit/CameraPermissionGate.swift` and app boot flow. | None |
+| FND-003 | Done | `CaptureSessionService` abstraction and tests. | None |
+| FND-004 | Done | Structured capture/session logging and event schema implemented. | None |
+| FND-005 | Done | CI job with lint/build/test in `/Users/ignacio/Code/photodew/.github/workflows/ci.yml`. | None |
+| CAM-001 | Done | Live preview + shutter path in `/Users/ignacio/Code/photodew/ios/PhotodewApp/ContentView.swift` and backend capture pipeline. | None |
+| CAM-002 | Done | Camera switch control and backend switching implemented. | None |
+| CAM-003 | Done | Save-to-Photos flow (including RAW pair save) in `/Users/ignacio/Code/photodew/ios/PhotodewApp/PhotodewIOSApp.swift`. | None |
+| CAM-004 | In progress | Capture/save path works, but explicit orientation/EXIF validation matrix is not documented yet. | Add device validation notes and fixes if needed. |
+| CAM-005 | Not started | No capture latency metric fields/events yet. | Add capture-start/capture-end timing telemetry. |
+| CAM-006 | In progress | Watchdog + recovery exists; resume-on-active path exists. | Validate interruption scenarios and tighten retry UX copy. |
+| RAW-001 | Done | RAW capability detection and gating wired from backend to UI. | None |
+| RAW-002 | Done | True RAW capture path generates DNG on supported device. | None |
+| RAW-003 | Done | RAW+processed payload capture and dual Photos save implemented. | None |
+| RAW-004 | Done | RAW policy enforces speed mode and zoom/crop guardrails before capture. | None |
+| RAW-005 | Not started | Metadata store currently persists capture/library metadata, not full lens/ISO/shutter/WB pack. | Implement metadata extraction + validation. |
+| RAW-006 | Not started | No storage pressure warning or cleanup UX yet. | Design and implement storage management flow. |
+| RAW-008 | Not started | Basic mode labels exist, but dedicated education copy is pending. | Add clear in-app RAW vs ProRAW education copy. |
+
+### Immediate Next Sequence
+
+1. Finish `CAM-004` with explicit orientation/EXIF device validation evidence.
+2. Implement `CAM-005` capture latency instrumentation events.
+3. Implement `RAW-005` metadata pack for lens, ISO, shutter, and WB.
+4. Implement `RAW-006` storage pressure and cleanup strategy.
+5. Implement `RAW-008` mode education copy.
+
+### Known Device Console Noise
+
+- Device logs `FigXPCUtilities/FigCaptureSourceRemote err=-17281` are currently treated as non-blocking based on Apple Developer Forums guidance. Track only if user-facing behavior regresses.
 
 ## 1) Product Objective
 
@@ -180,4 +227,3 @@ Track weekly:
 - DNG capture success rate on supported devices.
 - Manual control accuracy rate (selected vs metadata values).
 - TestFlight qualitative feedback score (1-5).
-

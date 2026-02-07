@@ -58,9 +58,12 @@ final class BootstrapViewModel: ObservableObject {
     @Published private(set) var focusState: FocusControlState = .auto
     @Published private(set) var whiteBalanceState: WhiteBalanceControlState = .auto
     @Published private(set) var luminanceHistogram: LuminanceHistogram?
+    @Published private(set) var zebraClippingOverlay: ZebraClippingOverlay?
+    @Published private(set) var isZebraOverlayEnabled = false
     @Published var selectedExposureISO: Double = 100
     @Published var selectedExposureShutterSeconds: Double = 1.0 / 125.0
     @Published var selectedExposureCompensation: Double = 0
+    @Published var selectedZebraThreshold: Double = 0.95
     @Published var selectedFocusLensPosition: Double = 0.5
     @Published var selectedWhiteBalanceTemperatureKelvin: Double = 5_000
     @Published var selectedWhiteBalanceTint: Double = 0
@@ -80,12 +83,15 @@ final class BootstrapViewModel: ObservableObject {
     private var lastSavedLocalIdentifiers: [String] = []
     private var dismissSaveToastTask: Task<Void, Never>?
     private var lastHistogramPublishedAt: Date?
+    private var lastZebraOverlayPublishedAt: Date?
     #if canImport(AVFoundation)
     private var sessionNotificationObservers: [NSObjectProtocol] = []
     private weak var observedCaptureSession: AVCaptureSession?
     #endif
     private static let lowStorageThresholdBytes: Int64 = 5_000_000_000
     private static let minimumHistogramUpdateIntervalSeconds: TimeInterval = 1.0 / 12.0
+    private static let minimumZebraOverlayUpdateIntervalSeconds: TimeInterval = 1.0 / 12.0
+    static let zebraThresholdRange: ClosedRange<Double> = 0.85...0.99
     static let manualISOOptions: [Double] = [25, 50, 64, 80, 100, 125, 160, 200, 320, 400, 640, 800, 1_250]
     static let manualShutterOptions: [Double] = [
         1.0 / 1_000.0,
@@ -125,6 +131,7 @@ final class BootstrapViewModel: ObservableObject {
         )
         selectedCaptureFormat = .processed
         resetLuminanceHistogramUpdates()
+        resetZebraOverlayUpdates()
         return
         #else
         await model.bootstrap()
@@ -138,6 +145,8 @@ final class BootstrapViewModel: ObservableObject {
         refreshPresetState()
         configureSessionObserversIfNeeded()
         configureLuminanceHistogramUpdatesIfNeeded()
+        configureZebraOverlayUpdatesIfNeeded()
+        configureZebraOverlayUpdatesIfNeeded()
         #endif
     }
 
@@ -164,6 +173,7 @@ final class BootstrapViewModel: ObservableObject {
         selectedPresetSavedAt = nil
         storagePressureWarning = nil
         resetLuminanceHistogramUpdates()
+        resetZebraOverlayUpdates()
         removeSessionObservers()
     }
 
@@ -179,6 +189,7 @@ final class BootstrapViewModel: ObservableObject {
         refreshPresetState()
         configureSessionObserversIfNeeded()
         configureLuminanceHistogramUpdatesIfNeeded()
+        configureZebraOverlayUpdatesIfNeeded()
     }
 
     func capturePhoto() async {
@@ -348,6 +359,26 @@ final class BootstrapViewModel: ObservableObject {
             lastCaptureError = nil
         } catch {
             lastCaptureError = captureErrorMessage(from: error)
+        }
+    }
+
+    func toggleZebraOverlay() {
+        guard case .ready = state else { return }
+        isZebraOverlayEnabled.toggle()
+        if isZebraOverlayEnabled {
+            model.setZebraClippingThreshold(clampedZebraThreshold(selectedZebraThreshold))
+        } else {
+            model.setZebraClippingThreshold(nil)
+            zebraClippingOverlay = nil
+            lastZebraOverlayPublishedAt = nil
+        }
+    }
+
+    func applyZebraThresholdSelection() {
+        guard case .ready = state else { return }
+        selectedZebraThreshold = clampedZebraThreshold(selectedZebraThreshold)
+        if isZebraOverlayEnabled {
+            model.setZebraClippingThreshold(selectedZebraThreshold)
         }
     }
 
@@ -718,6 +749,46 @@ final class BootstrapViewModel: ObservableObject {
         }
         self.lastHistogramPublishedAt = now
         luminanceHistogram = histogram
+    }
+
+    private func configureZebraOverlayUpdatesIfNeeded() {
+        guard case .ready = state else {
+            resetZebraOverlayUpdates()
+            return
+        }
+        model.setZebraClippingOverlayHandler { [weak self] overlay in
+            guard let self else { return }
+            Task { @MainActor in
+                self.applyZebraClippingOverlay(overlay)
+            }
+        }
+        if isZebraOverlayEnabled {
+            model.setZebraClippingThreshold(clampedZebraThreshold(selectedZebraThreshold))
+        } else {
+            model.setZebraClippingThreshold(nil)
+        }
+    }
+
+    private func resetZebraOverlayUpdates() {
+        model.setZebraClippingThreshold(nil)
+        model.setZebraClippingOverlayHandler(nil)
+        zebraClippingOverlay = nil
+        lastZebraOverlayPublishedAt = nil
+    }
+
+    private func applyZebraClippingOverlay(_ overlay: ZebraClippingOverlay) {
+        guard isZebraOverlayEnabled else { return }
+        let now = Date()
+        if let lastZebraOverlayPublishedAt,
+           now.timeIntervalSince(lastZebraOverlayPublishedAt) < Self.minimumZebraOverlayUpdateIntervalSeconds {
+            return
+        }
+        lastZebraOverlayPublishedAt = now
+        zebraClippingOverlay = overlay
+    }
+
+    private func clampedZebraThreshold(_ value: Double) -> Double {
+        min(max(value, Self.zebraThresholdRange.lowerBound), Self.zebraThresholdRange.upperBound)
     }
 
     #if canImport(AVFoundation)

@@ -22,6 +22,12 @@ struct ContentView: View {
                let previewSession = bootstrap.previewSession {
                 CameraPreviewView(session: previewSession)
                     .ignoresSafeArea()
+                if bootstrap.isZebraOverlayEnabled,
+                   let zebraClippingOverlay = bootstrap.zebraClippingOverlay {
+                    ZebraClippingOverlayView(overlay: zebraClippingOverlay)
+                        .ignoresSafeArea()
+                        .allowsHitTesting(false)
+                }
             } else {
                 VStack(spacing: 14) {
                     CaptureStatusView(state: bootstrap.state)
@@ -184,6 +190,43 @@ struct ContentView: View {
 
                                 Button("Apply EV") {
                                     bootstrap.applyExposureCompensationSelection()
+                                }
+                                .buttonStyle(.bordered)
+                                .frame(maxWidth: .infinity)
+                            }
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .disabled(bootstrap.isCapturingPhoto || bootstrap.isRecoveringSession)
+
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text("Zebra Clipping")
+                                .font(.footnote.weight(.semibold))
+                                .foregroundStyle(.white)
+
+                            Text(zebraStatusLine)
+                                .font(.footnote)
+                                .foregroundStyle(.secondary)
+
+                            VStack(alignment: .leading, spacing: 4) {
+                                Slider(
+                                    value: $bootstrap.selectedZebraThreshold,
+                                    in: BootstrapViewModel.zebraThresholdRange,
+                                    step: 0.01
+                                )
+                                Text("Threshold: \(formattedZebraThreshold(bootstrap.selectedZebraThreshold))")
+                                    .font(.footnote)
+                                    .foregroundStyle(.secondary)
+                            }
+
+                            HStack(spacing: 10) {
+                                Button(bootstrap.isZebraOverlayEnabled ? "Disable Zebra" : "Enable Zebra") {
+                                    bootstrap.toggleZebraOverlay()
+                                }
+                                .buttonStyle(.bordered)
+                                .frame(maxWidth: .infinity)
+
+                                Button("Apply Threshold") {
+                                    bootstrap.applyZebraThresholdSelection()
                                 }
                                 .buttonStyle(.bordered)
                                 .frame(maxWidth: .infinity)
@@ -556,6 +599,19 @@ struct ContentView: View {
         return String(format: "%+.1f EV", value)
     }
 
+    private func formattedZebraThreshold(_ value: Double) -> String {
+        "\(Int((value * 100).rounded()))%"
+    }
+
+    private var zebraStatusLine: String {
+        let stateDescription = bootstrap.isZebraOverlayEnabled ? "Enabled" : "Disabled"
+        if let zebraClippingOverlay = bootstrap.zebraClippingOverlay {
+            let clippedPercent = Int((zebraClippingOverlay.clippedRatio * 100).rounded())
+            return "\(stateDescription) · clipped area \(clippedPercent)%"
+        }
+        return "\(stateDescription) · threshold \(formattedZebraThreshold(bootstrap.selectedZebraThreshold))"
+    }
+
     private var focusModeLine: String {
         switch bootstrap.focusState {
         case .auto:
@@ -639,6 +695,48 @@ private struct LuminanceHistogramOverlayView: View {
         )
         .accessibilityElement(children: .ignore)
         .accessibilityLabel("Luminance histogram")
+    }
+}
+
+private struct ZebraClippingOverlayView: View {
+    let overlay: ZebraClippingOverlay
+    private let stripeSpacing: CGFloat = 14
+    private let stripeLineWidth: CGFloat = 1.4
+
+    var body: some View {
+        GeometryReader { geometry in
+            Canvas { context, size in
+                guard overlay.columnCount > 0, overlay.rowCount > 0 else { return }
+                let cellWidth = size.width / CGFloat(overlay.columnCount)
+                let cellHeight = size.height / CGFloat(overlay.rowCount)
+                var clippedArea = Path()
+                for row in 0..<overlay.rowCount {
+                    for column in 0..<overlay.columnCount {
+                        guard overlay.isCellClipped(column: column, row: row) else { continue }
+                        let rect = CGRect(
+                            x: CGFloat(column) * cellWidth,
+                            y: CGFloat(row) * cellHeight,
+                            width: cellWidth,
+                            height: cellHeight
+                        )
+                        clippedArea.addRect(rect)
+                    }
+                }
+                guard !clippedArea.isEmpty else { return }
+                context.fill(clippedArea, with: .color(.black.opacity(0.15)))
+                context.clip(to: clippedArea)
+
+                var stripePath = Path()
+                for startX in stride(from: -size.height, through: size.width + size.height, by: stripeSpacing) {
+                    stripePath.move(to: CGPoint(x: startX, y: 0))
+                    stripePath.addLine(to: CGPoint(x: startX + size.height, y: size.height))
+                }
+                context.stroke(stripePath, with: .color(.white.opacity(0.7)), lineWidth: stripeLineWidth)
+            }
+            .frame(width: geometry.size.width, height: geometry.size.height)
+        }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("Zebra clipping overlay")
     }
 }
 

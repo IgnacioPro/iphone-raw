@@ -162,6 +162,8 @@ public protocol CaptureSessionBackend {
     func applyExposureCompensation(_ value: Double) throws -> Double
     func exposureCompensationRange() -> ClosedRange<Double>?
     func setLuminanceHistogramHandler(_ handler: LuminanceHistogramHandler?)
+    func setZebraClippingThreshold(_ threshold: Double?)
+    func setZebraClippingOverlayHandler(_ handler: ZebraClippingOverlayHandler?)
 }
 
 public protocol CaptureSessionServing {
@@ -192,6 +194,8 @@ public protocol CaptureSessionServing {
     func setExposureCompensation(_ value: Double) throws
     func resetExposureCompensation() throws
     func setLuminanceHistogramHandler(_ handler: LuminanceHistogramHandler?)
+    func setZebraClippingThreshold(_ threshold: Double?)
+    func setZebraClippingOverlayHandler(_ handler: ZebraClippingOverlayHandler?)
 }
 
 public extension CaptureSessionBackend {
@@ -239,6 +243,10 @@ public extension CaptureSessionBackend {
     }
 
     func setLuminanceHistogramHandler(_ handler: LuminanceHistogramHandler?) {}
+
+    func setZebraClippingThreshold(_ threshold: Double?) {}
+
+    func setZebraClippingOverlayHandler(_ handler: ZebraClippingOverlayHandler?) {}
 }
 
 public extension CaptureSessionServing {
@@ -550,6 +558,14 @@ public final class CaptureSessionService: CaptureSessionServing {
         backend.setLuminanceHistogramHandler(handler)
     }
 
+    public func setZebraClippingThreshold(_ threshold: Double?) {
+        backend.setZebraClippingThreshold(threshold)
+    }
+
+    public func setZebraClippingOverlayHandler(_ handler: ZebraClippingOverlayHandler?) {
+        backend.setZebraClippingOverlayHandler(handler)
+    }
+
     private static func captureLatencyMilliseconds(from start: Date, to end: Date) -> Int {
         max(Int((end.timeIntervalSince(start) * 1_000).rounded()), 0)
     }
@@ -821,6 +837,10 @@ public final class AVCaptureSessionBackend: NSObject, CaptureSessionBackend {
     private var inFlightCaptures: [UUID: PhotoCaptureProcessor] = [:]
     private let histogramHandlerLock = NSLock()
     private var histogramHandler: LuminanceHistogramHandler?
+    private let zebraOverlayLock = NSLock()
+    private var zebraThresholdLuma: UInt8?
+    private var zebraThresholdNormalized: Double = 0.95
+    private var zebraOverlayHandler: ZebraClippingOverlayHandler?
     #endif
 
     public private(set) var isRunning = false
@@ -832,7 +852,7 @@ public final class AVCaptureSessionBackend: NSObject, CaptureSessionBackend {
         self.session = AVCaptureSession()
         self.photoOutput = AVCapturePhotoOutput()
         self.videoDataOutput = AVCaptureVideoDataOutput()
-        self.videoDataOutputQueue = DispatchQueue(label: "CameraKit.HistogramVideoDataOutput")
+        self.videoDataOutputQueue = DispatchQueue(label: "CameraKit.PreviewAnalysisVideoDataOutput")
         #endif
         super.init()
         #if canImport(AVFoundation)
@@ -846,7 +866,7 @@ public final class AVCaptureSessionBackend: NSObject, CaptureSessionBackend {
         self.session = AVCaptureSession()
         self.photoOutput = AVCapturePhotoOutput()
         self.videoDataOutput = AVCaptureVideoDataOutput()
-        self.videoDataOutputQueue = DispatchQueue(label: "CameraKit.HistogramVideoDataOutput")
+        self.videoDataOutputQueue = DispatchQueue(label: "CameraKit.PreviewAnalysisVideoDataOutput")
         #endif
         super.init()
         #if canImport(AVFoundation)
@@ -1121,6 +1141,28 @@ public final class AVCaptureSessionBackend: NSObject, CaptureSessionBackend {
         #endif
     }
 
+    public func setZebraClippingThreshold(_ threshold: Double?) {
+        #if canImport(AVFoundation)
+        zebraOverlayLock.withLock {
+            guard let threshold else {
+                zebraThresholdLuma = nil
+                return
+            }
+            let clampedThreshold = min(max(threshold, 0), 1)
+            zebraThresholdNormalized = clampedThreshold
+            zebraThresholdLuma = UInt8((clampedThreshold * 255.0).rounded())
+        }
+        #endif
+    }
+
+    public func setZebraClippingOverlayHandler(_ handler: ZebraClippingOverlayHandler?) {
+        #if canImport(AVFoundation)
+        zebraOverlayLock.withLock {
+            zebraOverlayHandler = handler
+        }
+        #endif
+    }
+
     public func applyFocusState(_ state: FocusControlState) throws -> FocusControlState {
         #if canImport(AVFoundation)
         try configureSessionIfNeeded(for: activeLensPosition)
@@ -1342,6 +1384,29 @@ public final class AVCaptureSessionBackend: NSObject, CaptureSessionBackend {
             return
         }
         histogramHandler(histogram)
+    }
+
+    private func dispatchZebraOverlayIfNeeded(from sampleBuffer: CMSampleBuffer) {
+        let zebraConfiguration = zebraOverlayLock.withLock {
+            (
+                handler: zebraOverlayHandler,
+                thresholdLuma: zebraThresholdLuma,
+                threshold: zebraThresholdNormalized
+            )
+        }
+        guard let zebraHandler = zebraConfiguration.handler,
+              let thresholdLuma = zebraConfiguration.thresholdLuma else {
+            return
+        }
+        guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer),
+              let overlay = ZebraClippingOverlayAnalyzer.overlay(
+                  from: pixelBuffer,
+                  thresholdLuma: thresholdLuma,
+                  threshold: zebraConfiguration.threshold
+              ) else {
+            return
+        }
+        zebraHandler(overlay)
     }
 
     private func cameraDevice(for position: CaptureLensPosition) -> AVCaptureDevice? {
@@ -1607,6 +1672,7 @@ extension AVCaptureSessionBackend: AVCaptureVideoDataOutputSampleBufferDelegate 
     ) {
         guard output === videoDataOutput else { return }
         dispatchHistogramIfNeeded(from: sampleBuffer)
+        dispatchZebraOverlayIfNeeded(from: sampleBuffer)
     }
 }
 
@@ -1706,6 +1772,136 @@ private enum LuminanceHistogramAnalyzer {
                 sampleCount += 1
             }
         }
+    }
+}
+
+private enum ZebraClippingOverlayAnalyzer {
+    static let sampleStride = 4
+    static let minimumClippedSampleRatio = 0.08
+    static let columnCount = ZebraClippingOverlay.defaultColumnCount
+    static let rowCount = ZebraClippingOverlay.defaultRowCount
+
+    static func overlay(
+        from pixelBuffer: CVPixelBuffer,
+        thresholdLuma: UInt8,
+        threshold: Double
+    ) -> ZebraClippingOverlay? {
+        CVPixelBufferLockBaseAddress(pixelBuffer, .readOnly)
+        defer { CVPixelBufferUnlockBaseAddress(pixelBuffer, .readOnly) }
+
+        let cellCount = columnCount * rowCount
+        var clippedSampleCounts = Array(repeating: UInt32(0), count: cellCount)
+        var totalSampleCounts = Array(repeating: UInt32(0), count: cellCount)
+
+        let planeCount = CVPixelBufferGetPlaneCount(pixelBuffer)
+        if planeCount > 0 {
+            guard let baseAddress = CVPixelBufferGetBaseAddressOfPlane(pixelBuffer, 0) else {
+                return nil
+            }
+            let width = CVPixelBufferGetWidthOfPlane(pixelBuffer, 0)
+            let height = CVPixelBufferGetHeightOfPlane(pixelBuffer, 0)
+            let bytesPerRow = CVPixelBufferGetBytesPerRowOfPlane(pixelBuffer, 0)
+            accumulateClippingSamples(
+                fromPlanarLumaBaseAddress: baseAddress,
+                width: width,
+                height: height,
+                bytesPerRow: bytesPerRow,
+                thresholdLuma: thresholdLuma,
+                clippedSampleCounts: &clippedSampleCounts,
+                totalSampleCounts: &totalSampleCounts
+            )
+        } else {
+            guard CVPixelBufferGetPixelFormatType(pixelBuffer) == kCVPixelFormatType_32BGRA,
+                  let baseAddress = CVPixelBufferGetBaseAddress(pixelBuffer) else {
+                return nil
+            }
+            let width = CVPixelBufferGetWidth(pixelBuffer)
+            let height = CVPixelBufferGetHeight(pixelBuffer)
+            let bytesPerRow = CVPixelBufferGetBytesPerRow(pixelBuffer)
+            accumulateClippingSamples(
+                fromBGRABaseAddress: baseAddress,
+                width: width,
+                height: height,
+                bytesPerRow: bytesPerRow,
+                thresholdLuma: thresholdLuma,
+                clippedSampleCounts: &clippedSampleCounts,
+                totalSampleCounts: &totalSampleCounts
+            )
+        }
+
+        var clippedCells = Array(repeating: UInt8(0), count: cellCount)
+        for index in 0..<cellCount {
+            let totalSamples = totalSampleCounts[index]
+            guard totalSamples > 0 else { continue }
+            let clippedSamples = clippedSampleCounts[index]
+            if Double(clippedSamples) / Double(totalSamples) >= minimumClippedSampleRatio {
+                clippedCells[index] = 1
+            }
+        }
+
+        return ZebraClippingOverlay(
+            columnCount: columnCount,
+            rowCount: rowCount,
+            clippedCells: clippedCells,
+            threshold: threshold,
+            generatedAt: Date()
+        )
+    }
+
+    private static func accumulateClippingSamples(
+        fromPlanarLumaBaseAddress baseAddress: UnsafeMutableRawPointer,
+        width: Int,
+        height: Int,
+        bytesPerRow: Int,
+        thresholdLuma: UInt8,
+        clippedSampleCounts: inout [UInt32],
+        totalSampleCounts: inout [UInt32]
+    ) {
+        let lumaBuffer = baseAddress.assumingMemoryBound(to: UInt8.self)
+        for y in stride(from: 0, to: height, by: sampleStride) {
+            let rowPointer = lumaBuffer.advanced(by: y * bytesPerRow)
+            for x in stride(from: 0, to: width, by: sampleStride) {
+                let cellIndex = gridCellIndex(x: x, y: y, width: width, height: height)
+                totalSampleCounts[cellIndex] += 1
+                if rowPointer[x] >= thresholdLuma {
+                    clippedSampleCounts[cellIndex] += 1
+                }
+            }
+        }
+    }
+
+    private static func accumulateClippingSamples(
+        fromBGRABaseAddress baseAddress: UnsafeMutableRawPointer,
+        width: Int,
+        height: Int,
+        bytesPerRow: Int,
+        thresholdLuma: UInt8,
+        clippedSampleCounts: inout [UInt32],
+        totalSampleCounts: inout [UInt32]
+    ) {
+        let bgraBuffer = baseAddress.assumingMemoryBound(to: UInt8.self)
+        for y in stride(from: 0, to: height, by: sampleStride) {
+            let rowPointer = bgraBuffer.advanced(by: y * bytesPerRow)
+            for x in stride(from: 0, to: width, by: sampleStride) {
+                let pixelOffset = x * 4
+                let blue = Int(rowPointer[pixelOffset])
+                let green = Int(rowPointer[pixelOffset + 1])
+                let red = Int(rowPointer[pixelOffset + 2])
+                let luminance = UInt8((54 * red + 183 * green + 19 * blue) >> 8)
+                let cellIndex = gridCellIndex(x: x, y: y, width: width, height: height)
+                totalSampleCounts[cellIndex] += 1
+                if luminance >= thresholdLuma {
+                    clippedSampleCounts[cellIndex] += 1
+                }
+            }
+        }
+    }
+
+    private static func gridCellIndex(x: Int, y: Int, width: Int, height: Int) -> Int {
+        guard width > 0, height > 0 else { return 0 }
+        let column = min((x * columnCount) / width, columnCount - 1)
+        let row = min((y * rowCount) / height, rowCount - 1)
+        return row * columnCount + column
     }
 }
 

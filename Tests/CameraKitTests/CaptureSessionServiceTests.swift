@@ -252,6 +252,43 @@ struct CaptureSessionServiceTests {
         #expect(histogram.normalizedBins == [0.0, 0.25, 0.5, 1.0])
     }
 
+    @Test("zebra clipping threshold and handler forward to backend")
+    func zebraClippingConfigurationForwardsToBackend() {
+        let backend = StubCaptureBackend()
+        let service = CaptureSessionService(backend: backend)
+        let collector = ZebraOverlayCollector()
+        service.setZebraClippingOverlayHandler { overlay in
+            collector.append(overlay)
+        }
+        service.setZebraClippingThreshold(0.96)
+
+        let overlay = ZebraClippingOverlay(
+            columnCount: 2,
+            rowCount: 2,
+            clippedCells: [0, 1, 0, 1],
+            threshold: 0.96
+        )
+        backend.emitZebraClippingOverlay(overlay)
+
+        #expect(backend.latestZebraClippingThreshold == 0.96)
+        #expect(collector.snapshot() == [overlay])
+    }
+
+    @Test("zebra clipping overlay reports clipped ratio")
+    func zebraClippingOverlayReportsClippedRatio() {
+        let overlay = ZebraClippingOverlay(
+            columnCount: 2,
+            rowCount: 2,
+            clippedCells: [0, 1, 1, 0],
+            threshold: 0.95
+        )
+
+        #expect(overlay.clippedCellCount == 2)
+        #expect(overlay.clippedRatio == 0.5)
+        #expect(overlay.isCellClipped(column: 1, row: 0))
+        #expect(!overlay.isCellClipped(column: 0, row: 0))
+    }
+
     @Test("markInterrupted updates state and emits interruption event")
     func markInterrupted() throws {
         let backend = StubCaptureBackend()
@@ -570,6 +607,8 @@ private final class StubCaptureBackend: CaptureSessionBackend {
     private var focusState: FocusControlState = .auto
     private var whiteBalanceState: WhiteBalanceControlState = .auto
     private var luminanceHistogramHandler: LuminanceHistogramHandler?
+    private var zebraClippingOverlayHandler: ZebraClippingOverlayHandler?
+    private(set) var latestZebraClippingThreshold: Double?
 
     init(
         shouldFailStart: Bool = false,
@@ -738,6 +777,18 @@ private final class StubCaptureBackend: CaptureSessionBackend {
     func emitLuminanceHistogram(_ histogram: LuminanceHistogram) {
         luminanceHistogramHandler?(histogram)
     }
+
+    func setZebraClippingThreshold(_ threshold: Double?) {
+        latestZebraClippingThreshold = threshold
+    }
+
+    func setZebraClippingOverlayHandler(_ handler: ZebraClippingOverlayHandler?) {
+        zebraClippingOverlayHandler = handler
+    }
+
+    func emitZebraClippingOverlay(_ overlay: ZebraClippingOverlay) {
+        zebraClippingOverlayHandler?(overlay)
+    }
 }
 
 private final class HistogramCollector: @unchecked Sendable {
@@ -753,6 +804,24 @@ private final class HistogramCollector: @unchecked Sendable {
     func snapshot() -> [LuminanceHistogram] {
         lock.lock()
         let values = histograms
+        lock.unlock()
+        return values
+    }
+}
+
+private final class ZebraOverlayCollector: @unchecked Sendable {
+    private let lock = NSLock()
+    private var overlays: [ZebraClippingOverlay] = []
+
+    func append(_ overlay: ZebraClippingOverlay) {
+        lock.lock()
+        overlays.append(overlay)
+        lock.unlock()
+    }
+
+    func snapshot() -> [ZebraClippingOverlay] {
+        lock.lock()
+        let values = overlays
         lock.unlock()
         return values
     }

@@ -135,6 +135,14 @@ public final class CaptureAppModel {
         sessionService.setLuminanceHistogramHandler(handler)
     }
 
+    public func setZebraClippingThreshold(_ threshold: Double?) {
+        sessionService.setZebraClippingThreshold(threshold)
+    }
+
+    public func setZebraClippingOverlayHandler(_ handler: ZebraClippingOverlayHandler?) {
+        sessionService.setZebraClippingOverlayHandler(handler)
+    }
+
     public func exposureState() -> ExposureControlState {
         sessionService.exposureState
     }

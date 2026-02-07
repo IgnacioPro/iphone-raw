@@ -20,6 +20,8 @@ private enum CaptureDesignTokens {
     static let minimumTouchTarget: CGFloat = 44
     static let shutterButtonOuterSize: CGFloat = 72
     static let shutterButtonInnerSize: CGFloat = 58
+    static let thumbnailSize: CGFloat = 48
+    static let thumbnailCornerRadius: CGFloat = 8
     static let histogramWidth: CGFloat = 80
     static let histogramHeight: CGFloat = 32
     static let proControlsPanelMaxHeight: CGFloat = 340
@@ -211,18 +213,41 @@ struct ContentView: View {
 
             Spacer(minLength: 0)
 
-            ShutterControlButton(
-                isBusy: bootstrap.isCapturingPhoto || bootstrap.isRecoveringSession,
-                action: {
-                    hapticMedium()
-                    Task { @MainActor in
-                        await bootstrap.capturePhoto()
+            HStack {
+                // Left spacer — balances the thumbnail on the right
+                Color.clear
+                    .frame(width: CaptureDesignTokens.thumbnailSize, height: CaptureDesignTokens.thumbnailSize)
+
+                Spacer()
+
+                ShutterControlButton(
+                    isBusy: bootstrap.isCapturingPhoto || bootstrap.isRecoveringSession,
+                    action: {
+                        hapticMedium()
+                        Task { @MainActor in
+                            await bootstrap.capturePhoto()
+                        }
                     }
-                }
-            )
-            .disabled(isInteractionDisabled)
-            .accessibilityLabel("Shutter")
-            .accessibilityValue(shutterButtonTitle)
+                )
+                .disabled(isInteractionDisabled)
+                .accessibilityLabel("Shutter")
+                .accessibilityValue(shutterButtonTitle)
+
+                Spacer()
+
+                #if canImport(UIKit)
+                LastPhotoThumbnailButton(
+                    thumbnail: bootstrap.lastCapturedThumbnail,
+                    action: {
+                        hapticLight()
+                        if let url = URL(string: "photos-redirect://") {
+                            UIApplication.shared.open(url)
+                        }
+                    }
+                )
+                #endif
+            }
+            .padding(.horizontal, CaptureDesignTokens.chromeInset * 2)
 
             Spacer(minLength: 0)
         }
@@ -1076,6 +1101,46 @@ private struct ShutterControlButton: View {
         .buttonStyle(.plain)
     }
 }
+
+// MARK: - Last Photo Thumbnail Button
+
+#if canImport(UIKit)
+private struct LastPhotoThumbnailButton: View {
+    let thumbnail: UIImage?
+    let action: @MainActor () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            Group {
+                if let thumbnail {
+                    Image(uiImage: thumbnail)
+                        .resizable()
+                        .scaledToFill()
+                } else {
+                    RoundedRectangle(cornerRadius: CaptureDesignTokens.thumbnailCornerRadius)
+                        .fill(.white.opacity(0.08))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: CaptureDesignTokens.thumbnailCornerRadius)
+                                .stroke(.white.opacity(0.2), lineWidth: 1)
+                        )
+                }
+            }
+            .frame(
+                width: CaptureDesignTokens.thumbnailSize,
+                height: CaptureDesignTokens.thumbnailSize
+            )
+            .clipShape(RoundedRectangle(cornerRadius: CaptureDesignTokens.thumbnailCornerRadius))
+            .overlay(
+                RoundedRectangle(cornerRadius: CaptureDesignTokens.thumbnailCornerRadius)
+                    .stroke(.white.opacity(0.3), lineWidth: 1)
+            )
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("Last photo")
+        .accessibilityHint("Opens Photos")
+    }
+}
+#endif
 
 // MARK: - Horizon Level Indicator
 

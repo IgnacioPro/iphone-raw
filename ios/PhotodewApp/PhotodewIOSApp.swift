@@ -125,6 +125,9 @@ final class BootstrapViewModel: ObservableObject {
     @Published private(set) var lastCaptureByteCount: Int?
     @Published private(set) var lastCaptureAt: Date?
     @Published private(set) var lastCaptureError: String?
+    #if canImport(UIKit)
+    @Published private(set) var lastCapturedThumbnail: UIImage?
+    #endif
     @Published private(set) var saveToast: SaveToastState?
     @Published private(set) var selectedCaptureFormat: CapturePhotoFormat = .processed
     @Published private(set) var storagePressureWarning: String?
@@ -249,6 +252,7 @@ final class BootstrapViewModel: ObservableObject {
         configureZebraOverlayUpdatesIfNeeded()
         configureFocusPeakingOverlayUpdatesIfNeeded()
         configureHorizonLevelUpdatesIfNeeded()
+        await fetchLastPhotoThumbnail()
         #endif
     }
 
@@ -342,6 +346,9 @@ final class BootstrapViewModel: ObservableObject {
                 pairedCaptureMetadata: pairedCaptureMetadata
             )
             refreshStoragePressureWarning()
+            #if canImport(UIKit)
+            updateLastCapturedThumbnail(from: capturePayload)
+            #endif
             setSaveToast(.saved)
             scheduleSaveToastDismiss()
             activeCaptureID = nil
@@ -387,6 +394,67 @@ final class BootstrapViewModel: ObservableObject {
             lastCaptureError = captureErrorMessage(from: error)
         }
     }
+
+    #if canImport(UIKit)
+    private func updateLastCapturedThumbnail(from payload: CapturedPhotoPayload) {
+        let imageData = payload.processedData ?? payload.rawData
+        guard let imageData, let fullImage = UIImage(data: imageData) else { return }
+        let thumbnailSize: CGFloat = 96 // 48pt × 2x retina
+        let renderer = UIGraphicsImageRenderer(size: CGSize(width: thumbnailSize, height: thumbnailSize))
+        lastCapturedThumbnail = renderer.image { _ in
+            let aspectRatio = fullImage.size.width / fullImage.size.height
+            let drawWidth: CGFloat
+            let drawHeight: CGFloat
+            if aspectRatio > 1 {
+                drawHeight = thumbnailSize
+                drawWidth = thumbnailSize * aspectRatio
+            } else {
+                drawWidth = thumbnailSize
+                drawHeight = thumbnailSize / aspectRatio
+            }
+            let drawX = (thumbnailSize - drawWidth) / 2
+            let drawY = (thumbnailSize - drawHeight) / 2
+            fullImage.draw(in: CGRect(x: drawX, y: drawY, width: drawWidth, height: drawHeight))
+        }
+    }
+    #endif
+
+    #if canImport(Photos) && canImport(UIKit)
+    private func fetchLastPhotoThumbnail() async {
+        var status = PHPhotoLibrary.authorizationStatus(for: .readWrite)
+        if status == .notDetermined {
+            status = await PHPhotoLibrary.requestAuthorization(for: .readWrite)
+        }
+        guard status == .authorized || status == .limited else { return }
+
+        let fetchOptions = PHFetchOptions()
+        fetchOptions.sortDescriptors = [NSSortDescriptor(key: "creationDate", ascending: false)]
+        fetchOptions.fetchLimit = 1
+        let result = PHAsset.fetchAssets(with: .image, options: fetchOptions)
+        guard let asset = result.firstObject else { return }
+
+        let thumbnailPixelSize = CGSize(width: 96, height: 96) // 48pt × 2x retina
+        let options = PHImageRequestOptions()
+        options.deliveryMode = .opportunistic
+        options.resizeMode = .fast
+        options.isNetworkAccessAllowed = false
+        options.isSynchronous = false
+
+        PHImageManager.default().requestImage(
+            for: asset,
+            targetSize: thumbnailPixelSize,
+            contentMode: .aspectFill,
+            options: options
+        ) { [weak self] image, _ in
+            Task { @MainActor [weak self] in
+                guard let self, let image else { return }
+                if self.lastCapturedThumbnail == nil {
+                    self.lastCapturedThumbnail = image
+                }
+            }
+        }
+    }
+    #endif
 
     func retrySessionRecovery() async {
         lastCaptureError = "Retrying camera session..."

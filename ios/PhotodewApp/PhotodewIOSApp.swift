@@ -43,6 +43,80 @@ enum SaveToastState: Equatable {
     }
 }
 
+/// A `Sendable` weak-reference box that avoids capturing `@MainActor`-isolated
+/// objects directly in `@Sendable` closures, which would trigger Swift 6.1
+/// runtime isolation assertions even when the closure only forwards to a
+/// `Task { @MainActor in }` block.
+private final class WeakRef<T: AnyObject>: @unchecked Sendable {
+    weak var value: T?
+    init(_ value: T) { self.value = value }
+}
+
+// MARK: - Non-isolated callback factories
+//
+// Closures defined inside a @MainActor method inherit MainActor isolation,
+// causing Swift 6.1 to insert runtime dispatch-queue assertions even when the
+// closure never accesses actor-isolated state directly.  These free functions
+// live outside any actor context so the closures they return are genuinely
+// nonisolated.
+
+#if canImport(CoreMotion)
+import CoreMotion
+
+/// Returns a Core Motion handler that forwards device-motion updates to the
+/// MainActor via the provided `WeakRef`.
+private func makeMotionHandler(
+    weakSelf: WeakRef<BootstrapViewModel>
+) -> (CMDeviceMotion?, (any Error)?) -> Void {
+    return { motion, error in
+        if let error {
+            let message = error.localizedDescription
+            Task { @MainActor in
+                weakSelf.value?.horizonStatusMessage = "Horizon updates failed: \(message)"
+            }
+            return
+        }
+        guard let rollRadians = motion?.attitude.roll else { return }
+        Task { @MainActor in
+            weakSelf.value?.applyHorizonRoll(radians: rollRadians)
+        }
+    }
+}
+#endif
+
+/// Returns a luminance-histogram handler that hops to MainActor.
+private func makeHistogramHandler(
+    weakSelf: WeakRef<BootstrapViewModel>
+) -> @Sendable (LuminanceHistogram) -> Void {
+    return { histogram in
+        Task { @MainActor in
+            weakSelf.value?.applyLuminanceHistogram(histogram)
+        }
+    }
+}
+
+/// Returns a zebra-clipping overlay handler that hops to MainActor.
+private func makeZebraHandler(
+    weakSelf: WeakRef<BootstrapViewModel>
+) -> @Sendable (ZebraClippingOverlay) -> Void {
+    return { overlay in
+        Task { @MainActor in
+            weakSelf.value?.applyZebraClippingOverlay(overlay)
+        }
+    }
+}
+
+/// Returns a focus-peaking overlay handler that hops to MainActor.
+private func makeFocusPeakingHandler(
+    weakSelf: WeakRef<BootstrapViewModel>
+) -> @Sendable (FocusPeakingOverlay) -> Void {
+    return { overlay in
+        Task { @MainActor in
+            weakSelf.value?.applyFocusPeakingOverlay(overlay)
+        }
+    }
+}
+
 @MainActor
 final class BootstrapViewModel: ObservableObject {
     @Published private(set) var state: AppBootState = .idle
@@ -64,7 +138,7 @@ final class BootstrapViewModel: ObservableObject {
     @Published private(set) var zebraClippingOverlay: ZebraClippingOverlay?
     @Published private(set) var focusPeakingOverlay: FocusPeakingOverlay?
     @Published private(set) var horizonRollDegrees: Double?
-    @Published private(set) var horizonStatusMessage: String?
+    @Published fileprivate(set) var horizonStatusMessage: String?
     @Published private(set) var isZebraOverlayEnabled = false
     @Published private(set) var isFocusPeakingEnabled = false
     @Published var selectedExposureISO: Double = 100
@@ -108,6 +182,7 @@ final class BootstrapViewModel: ObservableObject {
     private static let minimumFocusPeakingOverlayUpdateIntervalSeconds: TimeInterval = 1.0 / 12.0
     private static let minimumHorizonLevelUpdateIntervalSeconds: TimeInterval = 1.0 / 30.0
     private static let horizonLevelSmoothingFactor: Double = 0.35
+    private static let isHorizonLevelEnabled = true
     static let horizonLevelToleranceDegrees: Double = 1.4
     static let zebraThresholdRange: ClosedRange<Double> = 0.85...0.99
     static let focusPeakingThresholdRange: ClosedRange<Double> = 0.12...0.4
@@ -177,8 +252,8 @@ final class BootstrapViewModel: ObservableObject {
         #endif
     }
 
-    func stop() {
-        model.stopSession()
+    func stop() async {
+        await model.stopSession()
         rawCaptureCapability = RawCaptureCapability(
             isSupported: false,
             availableRawPhotoPixelFormatTypes: [],
@@ -206,8 +281,8 @@ final class BootstrapViewModel: ObservableObject {
         removeSessionObservers()
     }
 
-    func resumeSessionIfNeeded() {
-        model.resumeSessionIfNeeded()
+    func resumeSessionIfNeeded() async {
+        await model.resumeSessionIfNeeded()
         state = model.bootState
         refreshRawCaptureCapability()
         refreshExposureState()
@@ -318,10 +393,10 @@ final class BootstrapViewModel: ObservableObject {
         await recoverSession(trigger: "manual_retry")
     }
 
-    func switchCamera() {
+    func switchCamera() async {
         guard case .ready = state else { return }
         do {
-            try model.switchCamera()
+            try await model.switchCamera()
             lastCaptureError = nil
             refreshRawCaptureCapability()
             refreshExposureState()
@@ -534,7 +609,7 @@ final class BootstrapViewModel: ObservableObject {
         isRecoveringSession = true
         defer { isRecoveringSession = false }
 
-        model.stopSession()
+        await model.stopSession()
         await model.bootstrap()
         state = model.bootState
         refreshRawCaptureCapability()
@@ -781,12 +856,8 @@ final class BootstrapViewModel: ObservableObject {
             resetLuminanceHistogramUpdates()
             return
         }
-        model.setLuminanceHistogramHandler { [weak self] histogram in
-            guard let self else { return }
-            Task { @MainActor in
-                self.applyLuminanceHistogram(histogram)
-            }
-        }
+        let weakSelf = WeakRef(self)
+        model.setLuminanceHistogramHandler(makeHistogramHandler(weakSelf: weakSelf))
     }
 
     private func resetLuminanceHistogramUpdates() {
@@ -795,7 +866,7 @@ final class BootstrapViewModel: ObservableObject {
         luminanceHistogram = nil
     }
 
-    private func applyLuminanceHistogram(_ histogram: LuminanceHistogram) {
+    fileprivate func applyLuminanceHistogram(_ histogram: LuminanceHistogram) {
         let now = Date()
         if let lastHistogramPublishedAt,
            now.timeIntervalSince(lastHistogramPublishedAt) < Self.minimumHistogramUpdateIntervalSeconds {
@@ -810,12 +881,8 @@ final class BootstrapViewModel: ObservableObject {
             resetZebraOverlayUpdates()
             return
         }
-        model.setZebraClippingOverlayHandler { [weak self] overlay in
-            guard let self else { return }
-            Task { @MainActor in
-                self.applyZebraClippingOverlay(overlay)
-            }
-        }
+        let weakSelf = WeakRef(self)
+        model.setZebraClippingOverlayHandler(makeZebraHandler(weakSelf: weakSelf))
         if isZebraOverlayEnabled {
             model.setZebraClippingThreshold(clampedZebraThreshold(selectedZebraThreshold))
         } else {
@@ -830,7 +897,7 @@ final class BootstrapViewModel: ObservableObject {
         lastZebraOverlayPublishedAt = nil
     }
 
-    private func applyZebraClippingOverlay(_ overlay: ZebraClippingOverlay) {
+    fileprivate func applyZebraClippingOverlay(_ overlay: ZebraClippingOverlay) {
         guard isZebraOverlayEnabled else { return }
         let now = Date()
         if let lastZebraOverlayPublishedAt,
@@ -850,12 +917,8 @@ final class BootstrapViewModel: ObservableObject {
             resetFocusPeakingOverlayUpdates()
             return
         }
-        model.setFocusPeakingOverlayHandler { [weak self] overlay in
-            guard let self else { return }
-            Task { @MainActor in
-                self.applyFocusPeakingOverlay(overlay)
-            }
-        }
+        let weakSelf = WeakRef(self)
+        model.setFocusPeakingOverlayHandler(makeFocusPeakingHandler(weakSelf: weakSelf))
         if isFocusPeakingEnabled {
             model.setFocusPeakingThreshold(clampedFocusPeakingThreshold(selectedFocusPeakingThreshold))
         } else {
@@ -870,7 +933,7 @@ final class BootstrapViewModel: ObservableObject {
         lastFocusPeakingOverlayPublishedAt = nil
     }
 
-    private func applyFocusPeakingOverlay(_ overlay: FocusPeakingOverlay) {
+    fileprivate func applyFocusPeakingOverlay(_ overlay: FocusPeakingOverlay) {
         guard isFocusPeakingEnabled else { return }
         let now = Date()
         if let lastFocusPeakingOverlayPublishedAt,
@@ -890,6 +953,10 @@ final class BootstrapViewModel: ObservableObject {
             resetHorizonLevelUpdates()
             return
         }
+        guard Self.isHorizonLevelEnabled else {
+            resetHorizonLevelUpdates()
+            return
+        }
         #if canImport(CoreMotion)
         guard motionManager.isDeviceMotionAvailable else {
             horizonStatusMessage = "Horizon level unavailable on this device."
@@ -902,22 +969,12 @@ final class BootstrapViewModel: ObservableObject {
         horizonStatusMessage = nil
         motionManager.deviceMotionUpdateInterval = Self.minimumHorizonLevelUpdateIntervalSeconds
         let referenceFrame = preferredAttitudeReferenceFrame()
+        let weakSelf = WeakRef(self)
         motionManager.startDeviceMotionUpdates(
             using: referenceFrame,
-            to: motionUpdatesQueue
-        ) { [weak self] motion, error in
-            guard let self else { return }
-            if let error {
-                Task { @MainActor [weak self] in
-                    self?.horizonStatusMessage = "Horizon updates failed: \(error.localizedDescription)"
-                }
-                return
-            }
-            guard let rollRadians = motion?.attitude.roll else { return }
-            Task { @MainActor [weak self] in
-                self?.applyHorizonRoll(radians: rollRadians)
-            }
-        }
+            to: motionUpdatesQueue,
+            withHandler: makeMotionHandler(weakSelf: weakSelf)
+        )
         #else
         horizonStatusMessage = "Horizon level requires Core Motion support."
         horizonRollDegrees = nil
@@ -935,7 +992,7 @@ final class BootstrapViewModel: ObservableObject {
         lastHorizonLevelPublishedAt = nil
     }
 
-    private func applyHorizonRoll(radians: Double) {
+    fileprivate func applyHorizonRoll(radians: Double) {
         let now = Date()
         if let lastHorizonLevelPublishedAt,
            now.timeIntervalSince(lastHorizonLevelPublishedAt) < Self.minimumHorizonLevelUpdateIntervalSeconds {

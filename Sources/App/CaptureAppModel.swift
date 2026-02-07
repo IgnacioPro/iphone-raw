@@ -43,7 +43,7 @@ public final class CaptureAppModel {
         switch access {
         case .granted:
             do {
-                try sessionService.start()
+                try await sessionService.start()
                 bootState = .ready
                 logger?.log(
                     CaptureEvent(
@@ -81,15 +81,15 @@ public final class CaptureAppModel {
         }
     }
 
-    public func stopSession() {
-        sessionService.stop()
+    public func stopSession() async {
+        await sessionService.stop()
     }
 
-    public func resumeSessionIfNeeded() {
+    public func resumeSessionIfNeeded() async {
         guard case .ready = bootState else { return }
 
         do {
-            try sessionService.start()
+            try await sessionService.start()
             bootState = .ready
         } catch {
             let message = String(describing: error)
@@ -104,8 +104,8 @@ public final class CaptureAppModel {
         }
     }
 
-    public func switchCamera() throws {
-        try sessionService.switchCamera()
+    public func switchCamera() async throws {
+        try await sessionService.switchCamera()
     }
 
     public func capturePhotoData() async throws -> Data {

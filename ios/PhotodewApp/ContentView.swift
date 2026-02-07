@@ -9,518 +9,90 @@ import AVFoundation
 import UIKit
 #endif
 
+// MARK: - Design Tokens
+
+private enum CaptureDesignTokens {
+    static let chromeInset: CGFloat = 12
+    static let controlGap: CGFloat = 10
+    static let sectionGap: CGFloat = 12
+    static let controlRadius: CGFloat = 12
+    static let panelRadius: CGFloat = 16
+    static let minimumTouchTarget: CGFloat = 44
+    static let shutterButtonOuterSize: CGFloat = 72
+    static let shutterButtonInnerSize: CGFloat = 58
+    static let histogramWidth: CGFloat = 80
+    static let histogramHeight: CGFloat = 32
+    static let proControlsPanelMaxHeight: CGFloat = 340
+    static let accentColor = Color(red: 0.93, green: 0.88, blue: 0.24)
+}
+
+// MARK: - Haptics
+
+#if canImport(UIKit)
+@MainActor
+private func hapticLight() {
+    UIImpactFeedbackGenerator(style: .light).impactOccurred()
+}
+
+@MainActor
+private func hapticMedium() {
+    UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+}
+
+@MainActor
+private func hapticRigid() {
+    UIImpactFeedbackGenerator(style: .rigid).impactOccurred()
+}
+#endif
+
+// MARK: - ContentView
+
+@MainActor
 struct ContentView: View {
     @Environment(\.scenePhase) private var scenePhase
     @ObservedObject var bootstrap: BootstrapViewModel
-    @State private var areAdvancedControlsExpanded = false
+
+    @State private var isProControlsPresented = false
 
     var body: some View {
         ZStack {
             Color.black.ignoresSafeArea()
 
+            #if canImport(AVFoundation)
             if case .ready = bootstrap.state,
                let previewSession = bootstrap.previewSession {
-                CameraPreviewView(session: previewSession)
-                    .ignoresSafeArea()
-                if bootstrap.isZebraOverlayEnabled,
-                   let zebraClippingOverlay = bootstrap.zebraClippingOverlay {
-                    ZebraClippingOverlayView(overlay: zebraClippingOverlay)
-                        .ignoresSafeArea()
-                        .allowsHitTesting(false)
-                }
-                if bootstrap.isFocusPeakingEnabled,
-                   let focusPeakingOverlay = bootstrap.focusPeakingOverlay {
-                    FocusPeakingOverlayView(overlay: focusPeakingOverlay)
-                        .ignoresSafeArea()
-                        .allowsHitTesting(false)
-                }
+                readyCameraSurface(session: previewSession)
             } else {
-                VStack(spacing: 14) {
-                    CaptureStatusView(state: bootstrap.state)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-
-                    Button(buttonTitle) {
-                        Task {
-                            await bootstrap.start()
-                        }
-                    }
-                    .buttonStyle(.borderedProminent)
-
-                    #if targetEnvironment(simulator)
-                    Text("The iOS simulator has no real camera input. Run Photodew on a physical iPhone to test capture.")
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
-                        .multilineTextAlignment(.center)
-                    #endif
-                }
-                .padding(.horizontal, 20)
+                launchSurface
             }
+            #else
+            launchSurface
+            #endif
         }
         .overlay(alignment: .top) {
             if let saveToast = bootstrap.saveToast {
                 Text(saveToast.message)
                     .font(.footnote.weight(.semibold))
                     .foregroundStyle(.white)
-                    .padding(.horizontal, 14)
+                    .padding(.horizontal, CaptureDesignTokens.chromeInset)
                     .padding(.vertical, 9)
-                    .background(.black.opacity(0.75), in: Capsule())
+                    .background(.black.opacity(0.78), in: Capsule())
+                    .overlay(
+                        Capsule()
+                            .stroke(.white.opacity(0.15), lineWidth: 1)
+                    )
                     .padding(.top, 60)
                     .transition(.move(edge: .top).combined(with: .opacity))
             }
         }
         .animation(.easeInOut(duration: 0.2), value: bootstrap.saveToast)
-        .safeAreaInset(edge: .top) {
-            if case .ready = bootstrap.state {
-                HStack {
-                    CaptureStatusView(state: bootstrap.state)
-                    Spacer(minLength: 0)
-                    if let horizonRollDegrees = bootstrap.horizonRollDegrees {
-                        HorizonLevelIndicatorView(
-                            rollDegrees: horizonRollDegrees,
-                            levelToleranceDegrees: BootstrapViewModel.horizonLevelToleranceDegrees
-                        )
-                        .frame(width: 96, height: 48)
-                    }
-                    if let luminanceHistogram = bootstrap.luminanceHistogram {
-                        LuminanceHistogramOverlayView(histogram: luminanceHistogram)
-                            .frame(width: 156, height: 62)
-                    }
-                }
-                .padding(.horizontal, 16)
-                .padding(.top, 8)
-                .background(.ultraThinMaterial.opacity(0.8))
-            }
-        }
-        .safeAreaInset(edge: .bottom) {
-            if case .ready = bootstrap.state {
-                VStack(spacing: 10) {
-                    HStack(spacing: 12) {
-                        Button("Switch Camera") {
-                            bootstrap.switchCamera()
-                        }
-                        .buttonStyle(.bordered)
-                        .disabled(bootstrap.isRecoveringSession || bootstrap.isCapturingPhoto)
-                        .frame(maxWidth: .infinity)
-
-                        Button(shutterButtonTitle) {
-                            Task {
-                                await bootstrap.capturePhoto()
-                            }
-                        }
-                        .buttonStyle(.borderedProminent)
-                        .disabled(bootstrap.isCapturingPhoto || bootstrap.isRecoveringSession)
-                        .frame(maxWidth: .infinity)
-                    }
-
-                    HStack(spacing: 12) {
-                        modeSelectionButton(
-                            title: "Processed",
-                            format: .processed,
-                            tint: .blue
-                        )
-                        modeSelectionButton(
-                            title: "True RAW",
-                            format: .raw,
-                            tint: .green
-                        )
-                        modeSelectionButton(
-                            title: "Apple ProRAW",
-                            format: .appleProRAW,
-                            tint: .orange
-                        )
-                    }
-
-                    Button(areAdvancedControlsExpanded ? "Hide Controls" : "Show Controls") {
-                        withAnimation(.easeInOut(duration: 0.2)) {
-                            areAdvancedControlsExpanded.toggle()
-                        }
-                    }
-                    .buttonStyle(.bordered)
-                    .disabled(bootstrap.isCapturingPhoto || bootstrap.isRecoveringSession)
-                    .frame(maxWidth: .infinity)
-
-                    if areAdvancedControlsExpanded {
-                        VStack(alignment: .leading, spacing: 8) {
-                            Text("Exposure Controls")
-                                .font(.footnote.weight(.semibold))
-                                .foregroundStyle(.white)
-
-                            Text(exposureModeLine)
-                                .font(.footnote)
-                                .foregroundStyle(.secondary)
-
-                            Text("EV compensation: \(formattedExposureCompensation(bootstrap.exposureCompensation))")
-                                .font(.footnote)
-                                .foregroundStyle(.secondary)
-
-                            HStack(spacing: 10) {
-                                Picker("ISO", selection: $bootstrap.selectedExposureISO) {
-                                    ForEach(BootstrapViewModel.manualISOOptions, id: \.self) { iso in
-                                        Text("ISO \(Int(iso))").tag(iso)
-                                    }
-                                }
-                                .pickerStyle(.menu)
-
-                                Picker("Shutter", selection: $bootstrap.selectedExposureShutterSeconds) {
-                                    ForEach(BootstrapViewModel.manualShutterOptions, id: \.self) { shutterSeconds in
-                                        Text(formattedShutter(shutterSeconds)).tag(shutterSeconds)
-                                    }
-                                }
-                                .pickerStyle(.menu)
-                            }
-
-                            HStack(spacing: 10) {
-                                Button("Auto") {
-                                    bootstrap.applyExposureAuto()
-                                }
-                                .buttonStyle(.bordered)
-                                .frame(maxWidth: .infinity)
-
-                                Button("Apply ISO/Shutter") {
-                                    bootstrap.applyCustomExposureSelection()
-                                }
-                                .buttonStyle(.bordered)
-                                .frame(maxWidth: .infinity)
-                            }
-
-                            VStack(alignment: .leading, spacing: 4) {
-                                Slider(
-                                    value: $bootstrap.selectedExposureCompensation,
-                                    in: bootstrap.exposureCompensationRange,
-                                    step: 0.1
-                                )
-                                Text("Selected EV: \(formattedExposureCompensation(bootstrap.selectedExposureCompensation))")
-                                    .font(.footnote)
-                                    .foregroundStyle(.secondary)
-                            }
-
-                            HStack(spacing: 10) {
-                                Button("Reset EV") {
-                                    bootstrap.resetExposureCompensation()
-                                }
-                                .buttonStyle(.bordered)
-                                .frame(maxWidth: .infinity)
-
-                                Button("Apply EV") {
-                                    bootstrap.applyExposureCompensationSelection()
-                                }
-                                .buttonStyle(.bordered)
-                                .frame(maxWidth: .infinity)
-                            }
-                        }
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .disabled(bootstrap.isCapturingPhoto || bootstrap.isRecoveringSession)
-
-                        VStack(alignment: .leading, spacing: 8) {
-                            Text("Zebra Clipping")
-                                .font(.footnote.weight(.semibold))
-                                .foregroundStyle(.white)
-
-                            Text(zebraStatusLine)
-                                .font(.footnote)
-                                .foregroundStyle(.secondary)
-
-                            VStack(alignment: .leading, spacing: 4) {
-                                Slider(
-                                    value: $bootstrap.selectedZebraThreshold,
-                                    in: BootstrapViewModel.zebraThresholdRange,
-                                    step: 0.01
-                                )
-                                Text("Threshold: \(formattedZebraThreshold(bootstrap.selectedZebraThreshold))")
-                                    .font(.footnote)
-                                    .foregroundStyle(.secondary)
-                            }
-
-                            HStack(spacing: 10) {
-                                Button(bootstrap.isZebraOverlayEnabled ? "Disable Zebra" : "Enable Zebra") {
-                                    bootstrap.toggleZebraOverlay()
-                                }
-                                .buttonStyle(.bordered)
-                                .frame(maxWidth: .infinity)
-
-                                Button("Apply Threshold") {
-                                    bootstrap.applyZebraThresholdSelection()
-                                }
-                                .buttonStyle(.bordered)
-                                .frame(maxWidth: .infinity)
-                            }
-                        }
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .disabled(bootstrap.isCapturingPhoto || bootstrap.isRecoveringSession)
-
-                        VStack(alignment: .leading, spacing: 8) {
-                            Text("Focus Peaking")
-                                .font(.footnote.weight(.semibold))
-                                .foregroundStyle(.white)
-
-                            Text(focusPeakingStatusLine)
-                                .font(.footnote)
-                                .foregroundStyle(.secondary)
-
-                            VStack(alignment: .leading, spacing: 4) {
-                                Slider(
-                                    value: $bootstrap.selectedFocusPeakingThreshold,
-                                    in: BootstrapViewModel.focusPeakingThresholdRange,
-                                    step: 0.01
-                                )
-                                Text("Threshold: \(formattedFocusPeakingThreshold(bootstrap.selectedFocusPeakingThreshold))")
-                                    .font(.footnote)
-                                    .foregroundStyle(.secondary)
-                            }
-
-                            HStack(spacing: 10) {
-                                Button(bootstrap.isFocusPeakingEnabled ? "Disable Peaking" : "Enable Peaking") {
-                                    bootstrap.toggleFocusPeakingOverlay()
-                                }
-                                .buttonStyle(.bordered)
-                                .frame(maxWidth: .infinity)
-
-                                Button("Apply Threshold") {
-                                    bootstrap.applyFocusPeakingThresholdSelection()
-                                }
-                                .buttonStyle(.bordered)
-                                .frame(maxWidth: .infinity)
-                            }
-                        }
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .disabled(bootstrap.isCapturingPhoto || bootstrap.isRecoveringSession)
-
-                        VStack(alignment: .leading, spacing: 8) {
-                            Text("Horizon Level")
-                                .font(.footnote.weight(.semibold))
-                                .foregroundStyle(.white)
-
-                            Text(horizonStatusLine)
-                                .font(.footnote)
-                                .foregroundStyle(.secondary)
-                        }
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .disabled(bootstrap.isCapturingPhoto || bootstrap.isRecoveringSession)
-
-                        VStack(alignment: .leading, spacing: 8) {
-                            Text("Focus Controls")
-                                .font(.footnote.weight(.semibold))
-                                .foregroundStyle(.white)
-
-                            Text(focusModeLine)
-                                .font(.footnote)
-                                .foregroundStyle(.secondary)
-
-                            VStack(alignment: .leading, spacing: 4) {
-                                Slider(
-                                    value: $bootstrap.selectedFocusLensPosition,
-                                    in: 0...1,
-                                    step: 0.02
-                                )
-                                Text("Selected: \(formattedFocusPosition(bootstrap.selectedFocusLensPosition))")
-                                    .font(.footnote)
-                                    .foregroundStyle(.secondary)
-                            }
-
-                            HStack(spacing: 10) {
-                                Button("Auto Focus") {
-                                    bootstrap.applyFocusAuto()
-                                }
-                                .buttonStyle(.bordered)
-                                .frame(maxWidth: .infinity)
-
-                                Button("Lock Focus") {
-                                    bootstrap.applyFocusLockSelection()
-                                }
-                                .buttonStyle(.bordered)
-                                .frame(maxWidth: .infinity)
-                            }
-                        }
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .disabled(bootstrap.isCapturingPhoto || bootstrap.isRecoveringSession)
-
-                        VStack(alignment: .leading, spacing: 8) {
-                            Text("White Balance Controls")
-                                .font(.footnote.weight(.semibold))
-                                .foregroundStyle(.white)
-
-                            Text(whiteBalanceModeLine)
-                                .font(.footnote)
-                                .foregroundStyle(.secondary)
-
-                            VStack(alignment: .leading, spacing: 4) {
-                                Slider(
-                                    value: $bootstrap.selectedWhiteBalanceTemperatureKelvin,
-                                    in: BootstrapViewModel.manualWhiteBalanceTemperatureRange,
-                                    step: 50
-                                )
-                                Text("Temperature: \(formattedWhiteBalanceTemperature(bootstrap.selectedWhiteBalanceTemperatureKelvin))")
-                                    .font(.footnote)
-                                    .foregroundStyle(.secondary)
-                            }
-
-                            VStack(alignment: .leading, spacing: 4) {
-                                Slider(
-                                    value: $bootstrap.selectedWhiteBalanceTint,
-                                    in: BootstrapViewModel.manualWhiteBalanceTintRange,
-                                    step: 1
-                                )
-                                Text("Tint: \(formattedWhiteBalanceTint(bootstrap.selectedWhiteBalanceTint))")
-                                    .font(.footnote)
-                                    .foregroundStyle(.secondary)
-                            }
-
-                            HStack(spacing: 10) {
-                                Button("Auto WB") {
-                                    bootstrap.applyWhiteBalanceAuto()
-                                }
-                                .buttonStyle(.bordered)
-                                .frame(maxWidth: .infinity)
-
-                                Button("Lock WB") {
-                                    bootstrap.applyWhiteBalanceLockSelection()
-                                }
-                                .buttonStyle(.bordered)
-                                .frame(maxWidth: .infinity)
-                            }
-                        }
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .disabled(bootstrap.isCapturingPhoto || bootstrap.isRecoveringSession)
-
-                        VStack(alignment: .leading, spacing: 8) {
-                            Text("Control Presets")
-                                .font(.footnote.weight(.semibold))
-                                .foregroundStyle(.white)
-
-                            Picker("Preset Slot", selection: $bootstrap.selectedPresetSlot) {
-                                ForEach(BootstrapViewModel.presetSlots, id: \.self) { slot in
-                                    Text(slot.displayName).tag(slot)
-                                }
-                            }
-                            .pickerStyle(.segmented)
-
-                            Text(presetStatusLine)
-                                .font(.footnote)
-                                .foregroundStyle(.secondary)
-
-                            HStack(spacing: 10) {
-                                Button("Save Preset") {
-                                    bootstrap.savePresetSelection()
-                                }
-                                .buttonStyle(.bordered)
-                                .frame(maxWidth: .infinity)
-
-                                Button("Apply Preset") {
-                                    bootstrap.applyPresetSelection()
-                                }
-                                .buttonStyle(.bordered)
-                                .disabled(!bootstrap.savedPresetSlots.contains(bootstrap.selectedPresetSlot))
-                                .frame(maxWidth: .infinity)
-                            }
-                        }
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .disabled(bootstrap.isCapturingPhoto || bootstrap.isRecoveringSession)
-
-                        Text("Mode: \(captureFormatTitle(bootstrap.selectedCaptureFormat))")
-                            .font(.footnote)
-                            .foregroundStyle(.secondary)
-
-                        VStack(alignment: .leading, spacing: 4) {
-                            Text("Mode Guide")
-                                .font(.footnote.weight(.semibold))
-                                .foregroundStyle(.white)
-
-                            Text(modeGuidePrimaryLine)
-                                .font(.footnote)
-                                .foregroundStyle(.secondary)
-
-                            Text("Apple ProRAW is partially processed computational RAW and remains scene-referred, but it is not sensor Bayer RAW.")
-                                .font(.footnote)
-                                .foregroundStyle(.secondary)
-
-                            Text("Processed mode is faster and smaller for sharing. True RAW (DNG) is larger and best for heavy edits.")
-                                .font(.footnote)
-                                .foregroundStyle(.secondary)
-                        }
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                    }
-
-                    if let lastCaptureByteCount = bootstrap.lastCaptureByteCount {
-                        Text("Last capture: \(formattedByteCount(lastCaptureByteCount))")
-                            .font(.footnote)
-                            .foregroundStyle(.secondary)
-                    }
-
-                    if let lastCaptureAt = bootstrap.lastCaptureAt {
-                        Text("Captured at \(lastCaptureAt.formatted(date: .omitted, time: .shortened))")
-                            .font(.footnote)
-                            .foregroundStyle(.secondary)
-                    }
-
-                    Text(rawCapabilityHeadline)
-                        .font(.footnote.weight(.semibold))
-                        .foregroundStyle(bootstrap.rawCaptureCapability.isSupported ? .green : .yellow)
-
-                    if let rawCapabilityReason = rawCapabilityReason {
-                        Text(rawCapabilityReason)
-                            .font(.footnote)
-                            .foregroundStyle(.secondary)
-                            .multilineTextAlignment(.center)
-                    }
-
-                    Text(appleProRAWCapabilityHeadline)
-                        .font(.footnote.weight(.semibold))
-                        .foregroundStyle(bootstrap.rawCaptureCapability.isAppleProRAWSupported ? .green : .yellow)
-
-                    if let appleProRAWCapabilityReason = appleProRAWCapabilityReason {
-                        Text(appleProRAWCapabilityReason)
-                            .font(.footnote)
-                            .foregroundStyle(.secondary)
-                            .multilineTextAlignment(.center)
-                    }
-
-                    if let storagePressureWarning = bootstrap.storagePressureWarning {
-                        Text(storagePressureWarning)
-                            .font(.footnote.weight(.semibold))
-                            .foregroundStyle(.yellow)
-                            .multilineTextAlignment(.center)
-                    }
-
-                    if bootstrap.storagePressureWarning != nil,
-                       (bootstrap.canCleanupRecentCapture || bootstrap.isCleaningRecentCapture) {
-                        Button(bootstrap.isCleaningRecentCapture ? "Cleaning..." : "Clean Last Capture") {
-                            Task {
-                                await bootstrap.cleanupRecentCapture()
-                            }
-                        }
-                        .buttonStyle(.bordered)
-                        .disabled(bootstrap.isCleaningRecentCapture || bootstrap.isCapturingPhoto)
-                        .frame(maxWidth: .infinity)
-                    }
-
-                    if let lastCaptureError = bootstrap.lastCaptureError {
-                        Text("Capture error: \(lastCaptureError)")
-                            .font(.footnote)
-                            .foregroundStyle(.red)
-                            .multilineTextAlignment(.center)
-
-                        Button(bootstrap.isRecoveringSession ? "Recovering..." : "Retry Camera Session") {
-                            Task {
-                                await bootstrap.retrySessionRecovery()
-                            }
-                        }
-                        .buttonStyle(.bordered)
-                        .disabled(bootstrap.isRecoveringSession || bootstrap.isCapturingPhoto)
-                        .frame(maxWidth: .infinity)
-                    }
-                }
-                .padding(.horizontal, 16)
-                .padding(.top, 12)
-                .padding(.bottom, 8)
-                .background(.ultraThinMaterial.opacity(0.85))
-            }
-        }
+        .statusBarHidden(true)
         .onChange(of: scenePhase) { _, newPhase in
             switch newPhase {
             case .active:
-                bootstrap.resumeSessionIfNeeded()
+                Task { await bootstrap.resumeSessionIfNeeded() }
             case .background:
-                bootstrap.stop()
+                Task { await bootstrap.stop() }
             case .inactive:
                 break
             @unknown default:
@@ -532,6 +104,692 @@ struct ContentView: View {
         }
     }
 
+    // MARK: - Launch Surface
+
+    private var launchSurface: some View {
+        VStack(spacing: 16) {
+            CaptureStatusView(state: bootstrap.state)
+                .frame(maxWidth: .infinity, alignment: .leading)
+
+            Button(buttonTitle) {
+                Task { @MainActor in
+                    await bootstrap.start()
+                }
+            }
+            .buttonStyle(.borderedProminent)
+
+            #if targetEnvironment(simulator)
+            Text("The iOS simulator has no real camera input. Run Photodew on a physical iPhone to test capture.")
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+            #endif
+        }
+        .padding(.horizontal, 20)
+    }
+
+    // MARK: - Ready Camera Surface
+
+    #if canImport(AVFoundation)
+    private func readyCameraSurface(session: AVCaptureSession) -> some View {
+        GeometryReader { geometry in
+            let screenWidth = geometry.size.width
+            let viewfinderHeight = screenWidth * 4.0 / 3.0  // 4:3 aspect ratio
+
+            VStack(spacing: 0) {
+                // Top bar — HUD + utility toggles on solid black
+                topCameraChrome
+
+                // 4:3 viewfinder — fixed aspect ratio, full width
+                ZStack {
+                    CameraPreviewView(session: session)
+
+                    // Assist overlays
+                    if bootstrap.isZebraOverlayEnabled,
+                       let zebraClippingOverlay = bootstrap.zebraClippingOverlay {
+                        ZebraClippingOverlayView(overlay: zebraClippingOverlay)
+                            .allowsHitTesting(false)
+                    }
+
+                    if bootstrap.isFocusPeakingEnabled,
+                       let focusPeakingOverlay = bootstrap.focusPeakingOverlay {
+                        FocusPeakingOverlayView(overlay: focusPeakingOverlay)
+                            .allowsHitTesting(false)
+                    }
+                }
+                .frame(width: screenWidth, height: viewfinderHeight)
+                .clipped()
+                .overlay(alignment: .bottom) {
+                    if isProControlsPresented {
+                        proControlsPanel
+                            .padding(.horizontal, CaptureDesignTokens.chromeInset)
+                            .padding(.bottom, CaptureDesignTokens.chromeInset)
+                            .transition(.move(edge: .bottom).combined(with: .opacity))
+                    }
+                }
+
+                // Bottom bar — shutter centered in remaining space
+                bottomChromeStack
+                    .frame(maxHeight: .infinity)
+            }
+        }
+        .background(Color.black)
+        .ignoresSafeArea()
+        .animation(.spring(response: 0.35, dampingFraction: 0.82), value: isProControlsPresented)
+        .gesture(
+            DragGesture(minimumDistance: 40)
+                .onEnded { value in
+                    if value.translation.height < -40, !isProControlsPresented {
+                        hapticLight()
+                        withAnimation { isProControlsPresented = true }
+                    } else if value.translation.height > 40, isProControlsPresented {
+                        hapticLight()
+                        withAnimation { isProControlsPresented = false }
+                    }
+                }
+        )
+    }
+
+    // MARK: - Top Chrome
+
+    private var topCameraChrome: some View {
+        VStack(spacing: 4) {
+            topHUD
+            cameraUtilityBar
+        }
+        .padding(.horizontal, CaptureDesignTokens.chromeInset)
+        .padding(.top, 4)
+        .padding(.bottom, 4)
+        .frame(maxWidth: .infinity, alignment: .top)
+    }
+
+    // MARK: - Bottom Chrome Stack
+
+    private var bottomChromeStack: some View {
+        VStack(spacing: CaptureDesignTokens.controlGap) {
+            cameraStatusFooter
+
+            Spacer(minLength: 0)
+
+            ShutterControlButton(
+                isBusy: bootstrap.isCapturingPhoto || bootstrap.isRecoveringSession,
+                action: {
+                    hapticMedium()
+                    Task { @MainActor in
+                        await bootstrap.capturePhoto()
+                    }
+                }
+            )
+            .disabled(isInteractionDisabled)
+            .accessibilityLabel("Shutter")
+            .accessibilityValue(shutterButtonTitle)
+
+            Spacer(minLength: 0)
+        }
+        .frame(maxWidth: .infinity)
+    }
+
+    // MARK: - Top HUD
+
+    private var topHUD: some View {
+        HStack(alignment: .center, spacing: 8) {
+            Group {
+                if let luminanceHistogram = bootstrap.luminanceHistogram {
+                    LuminanceHistogramOverlayView(histogram: luminanceHistogram)
+                        .frame(
+                            width: CaptureDesignTokens.histogramWidth,
+                            height: CaptureDesignTokens.histogramHeight
+                        )
+                } else {
+                    Image(systemName: "chart.bar.fill")
+                        .font(.system(size: 14, weight: .semibold))
+                        .foregroundStyle(.white.opacity(0.7))
+                        .frame(width: 32, height: 28)
+                        .background(.black.opacity(0.35), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                }
+            }
+
+            if let horizonRollDegrees = bootstrap.horizonRollDegrees {
+                HorizonLevelIndicatorView(
+                    rollDegrees: horizonRollDegrees,
+                    levelToleranceDegrees: BootstrapViewModel.horizonLevelToleranceDegrees
+                )
+                .frame(width: 56, height: 28)
+            }
+
+            Spacer(minLength: 0)
+
+            exposureHUDChip
+        }
+    }
+
+    // MARK: - Exposure HUD Chip
+
+    private var exposureHUDChip: some View {
+        HStack(spacing: 4) {
+            Circle()
+                .fill(.green)
+                .frame(width: 6, height: 6)
+
+            Text(formattedExposureCompensation(bootstrap.exposureCompensation))
+                .font(.caption2.weight(.semibold))
+                .monospacedDigit()
+                .contentTransition(.numericText())
+        }
+        .foregroundStyle(CaptureDesignTokens.accentColor)
+        .padding(.horizontal, 8)
+        .padding(.vertical, 5)
+        .background(.black.opacity(0.35), in: Capsule())
+        .overlay(
+            Capsule()
+                .stroke(.white.opacity(0.1), lineWidth: 0.5)
+        )
+        .contentShape(Capsule())
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("Exposure compensation")
+        .accessibilityValue(formattedExposureCompensation(bootstrap.exposureCompensation))
+    }
+
+    // MARK: - Camera Utility Bar (Quick Toggles)
+
+    private var cameraUtilityBar: some View {
+        HStack(spacing: 2) {
+            utilityToggle(
+                symbol: "arrow.triangle.2.circlepath.camera",
+                isActive: false,
+                label: "Switch Camera"
+            ) {
+                hapticLight()
+                Task { await bootstrap.switchCamera() }
+            }
+
+            utilityToggle(
+                symbol: "timer",
+                isActive: !isExposureAuto,
+                label: isExposureAuto ? "Lock Exposure" : "Unlock Exposure"
+            ) {
+                hapticLight()
+                toggleExposureMode()
+            }
+
+            utilityToggle(
+                symbol: "viewfinder",
+                isActive: bootstrap.isFocusPeakingEnabled,
+                label: bootstrap.isFocusPeakingEnabled ? "Disable Focus Peaking" : "Enable Focus Peaking"
+            ) {
+                hapticLight()
+                bootstrap.toggleFocusPeakingOverlay()
+            }
+
+            utilityToggle(
+                symbol: "lines.measurement.horizontal",
+                isActive: bootstrap.isZebraOverlayEnabled,
+                label: bootstrap.isZebraOverlayEnabled ? "Disable Zebra" : "Enable Zebra"
+            ) {
+                hapticLight()
+                bootstrap.toggleZebraOverlay()
+            }
+
+            utilityToggle(
+                symbol: "drop.halffull",
+                isActive: !isWhiteBalanceAuto,
+                label: isWhiteBalanceAuto ? "Lock White Balance" : "Unlock White Balance"
+            ) {
+                hapticLight()
+                toggleWhiteBalanceMode()
+            }
+
+            utilityToggle(
+                symbol: "slider.horizontal.3",
+                isActive: isProControlsPresented,
+                label: isProControlsPresented ? "Hide Pro Controls" : "Show Pro Controls"
+            ) {
+                hapticLight()
+                withAnimation(.spring(response: 0.35, dampingFraction: 0.82)) {
+                    isProControlsPresented.toggle()
+                }
+            }
+        }
+        .padding(.horizontal, 4)
+        .padding(.vertical, 2)
+    }
+
+    // MARK: - Camera Status Footer
+
+    private var cameraStatusFooter: some View {
+        VStack(spacing: 6) {
+            if let storagePressureWarning = bootstrap.storagePressureWarning {
+                statusNotice(
+                    text: storagePressureWarning,
+                    color: .yellow,
+                    showCleanup: bootstrap.canCleanupRecentCapture || bootstrap.isCleaningRecentCapture
+                )
+            }
+
+            if let lastCaptureError = bootstrap.lastCaptureError {
+                VStack(spacing: 6) {
+                    statusNotice(text: lastCaptureError, color: .red, showCleanup: false)
+
+                    Button(bootstrap.isRecoveringSession ? "Recovering..." : "Retry Camera Session") {
+                        Task { @MainActor in
+                            await bootstrap.retrySessionRecovery()
+                        }
+                    }
+                    .buttonStyle(.bordered)
+                    .disabled(bootstrap.isRecoveringSession || bootstrap.isCapturingPhoto)
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func statusNotice(text: String, color: Color, showCleanup: Bool) -> some View {
+        VStack(spacing: 6) {
+            Text(text)
+                .font(.caption)
+                .foregroundStyle(color)
+                .multilineTextAlignment(.center)
+
+            if showCleanup {
+                Button(bootstrap.isCleaningRecentCapture ? "Cleaning..." : "Clean Last Capture") {
+                    Task { @MainActor in
+                        await bootstrap.cleanupRecentCapture()
+                    }
+                }
+                .buttonStyle(.bordered)
+                .disabled(bootstrap.isCleaningRecentCapture || bootstrap.isCapturingPhoto)
+            }
+        }
+        .padding(.horizontal, 8)
+    }
+
+    // MARK: - Pro Controls Panel
+
+    private var proControlsPanel: some View {
+        ScrollView(showsIndicators: false) {
+            VStack(alignment: .leading, spacing: CaptureDesignTokens.sectionGap) {
+                HStack {
+                    panelTitle("Pro Controls")
+                    Spacer()
+                    Button {
+                        hapticLight()
+                        withAnimation(.spring(response: 0.35, dampingFraction: 0.82)) {
+                            isProControlsPresented = false
+                        }
+                    } label: {
+                        Image(systemName: "xmark.circle.fill")
+                            .font(.title3)
+                            .foregroundStyle(.white.opacity(0.6))
+                            .frame(
+                                width: CaptureDesignTokens.minimumTouchTarget,
+                                height: CaptureDesignTokens.minimumTouchTarget
+                            )
+                            .contentShape(Circle())
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("Close pro controls")
+                }
+
+                exposureSection
+                focusSection
+                whiteBalanceSection
+                assistSection
+                presetSection
+                captureModeSection
+                capabilitySection
+            }
+            .padding(CaptureDesignTokens.chromeInset)
+        }
+        .frame(maxHeight: CaptureDesignTokens.proControlsPanelMaxHeight)
+        .background(
+            .black.opacity(0.88),
+            in: RoundedRectangle(cornerRadius: CaptureDesignTokens.panelRadius, style: .continuous)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: CaptureDesignTokens.panelRadius, style: .continuous)
+                .stroke(.white.opacity(0.16), lineWidth: 1)
+        )
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("Pro controls panel")
+    }
+
+    // MARK: - Pro Panel Sections
+
+    private var exposureSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            panelTitle("Exposure")
+
+            Text(exposureModeLine)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+            HStack(spacing: 10) {
+                Picker("ISO", selection: $bootstrap.selectedExposureISO) {
+                    ForEach(BootstrapViewModel.manualISOOptions, id: \.self) { iso in
+                        Text("ISO \(Int(iso))").tag(iso)
+                    }
+                }
+                .pickerStyle(.menu)
+
+                Picker("Shutter", selection: $bootstrap.selectedExposureShutterSeconds) {
+                    ForEach(BootstrapViewModel.manualShutterOptions, id: \.self) { shutterSeconds in
+                        Text(formattedShutter(shutterSeconds)).tag(shutterSeconds)
+                    }
+                }
+                .pickerStyle(.menu)
+            }
+
+            HStack(spacing: 10) {
+                compactPanelButton("Auto") {
+                    hapticLight()
+                    bootstrap.applyExposureAuto()
+                }
+
+                compactPanelButton("Apply ISO/Shutter") {
+                    hapticLight()
+                    bootstrap.applyCustomExposureSelection()
+                }
+            }
+
+            VStack(alignment: .leading, spacing: 4) {
+                Slider(
+                    value: $bootstrap.selectedExposureCompensation,
+                    in: bootstrap.exposureCompensationRange,
+                    step: 0.1
+                )
+                Text("EV: \(formattedExposureCompensation(bootstrap.selectedExposureCompensation))")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            HStack(spacing: 10) {
+                compactPanelButton("Reset EV") {
+                    hapticLight()
+                    bootstrap.resetExposureCompensation()
+                }
+
+                compactPanelButton("Apply EV") {
+                    hapticLight()
+                    bootstrap.applyExposureCompensationSelection()
+                }
+            }
+        }
+        .disabled(isInteractionDisabled)
+    }
+
+    private var focusSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            panelTitle("Focus")
+
+            Text(focusModeLine)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+            VStack(alignment: .leading, spacing: 4) {
+                Slider(
+                    value: $bootstrap.selectedFocusLensPosition,
+                    in: 0...1,
+                    step: 0.02
+                )
+                Text("Manual focus: \(formattedFocusPosition(bootstrap.selectedFocusLensPosition))")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            HStack(spacing: 10) {
+                compactPanelButton("Auto Focus") {
+                    hapticRigid()
+                    bootstrap.applyFocusAuto()
+                }
+
+                compactPanelButton("Lock Focus") {
+                    hapticRigid()
+                    bootstrap.applyFocusLockSelection()
+                }
+            }
+        }
+        .disabled(isInteractionDisabled)
+    }
+
+    private var whiteBalanceSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            panelTitle("White Balance")
+
+            Text(whiteBalanceModeLine)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+            VStack(alignment: .leading, spacing: 4) {
+                Slider(
+                    value: $bootstrap.selectedWhiteBalanceTemperatureKelvin,
+                    in: BootstrapViewModel.manualWhiteBalanceTemperatureRange,
+                    step: 50
+                )
+                Text("Temperature: \(formattedWhiteBalanceTemperature(bootstrap.selectedWhiteBalanceTemperatureKelvin))")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            VStack(alignment: .leading, spacing: 4) {
+                Slider(
+                    value: $bootstrap.selectedWhiteBalanceTint,
+                    in: BootstrapViewModel.manualWhiteBalanceTintRange,
+                    step: 1
+                )
+                Text("Tint: \(formattedWhiteBalanceTint(bootstrap.selectedWhiteBalanceTint))")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            HStack(spacing: 10) {
+                compactPanelButton("Auto WB") {
+                    hapticLight()
+                    bootstrap.applyWhiteBalanceAuto()
+                }
+
+                compactPanelButton("Lock WB") {
+                    hapticLight()
+                    bootstrap.applyWhiteBalanceLockSelection()
+                }
+            }
+        }
+        .disabled(isInteractionDisabled)
+    }
+
+    private var assistSection: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            panelTitle("Assist Tools")
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text(zebraStatusLine)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+
+                Slider(
+                    value: $bootstrap.selectedZebraThreshold,
+                    in: BootstrapViewModel.zebraThresholdRange,
+                    step: 0.01
+                )
+
+                HStack(spacing: 10) {
+                    compactPanelButton(bootstrap.isZebraOverlayEnabled ? "Disable Zebra" : "Enable Zebra") {
+                        hapticLight()
+                        bootstrap.toggleZebraOverlay()
+                    }
+
+                    compactPanelButton("Apply Zebra") {
+                        hapticLight()
+                        bootstrap.applyZebraThresholdSelection()
+                    }
+                }
+            }
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text(focusPeakingStatusLine)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+
+                Slider(
+                    value: $bootstrap.selectedFocusPeakingThreshold,
+                    in: BootstrapViewModel.focusPeakingThresholdRange,
+                    step: 0.01
+                )
+
+                HStack(spacing: 10) {
+                    compactPanelButton(bootstrap.isFocusPeakingEnabled ? "Disable Peaking" : "Enable Peaking") {
+                        hapticLight()
+                        bootstrap.toggleFocusPeakingOverlay()
+                    }
+
+                    compactPanelButton("Apply Peaking") {
+                        hapticLight()
+                        bootstrap.applyFocusPeakingThresholdSelection()
+                    }
+                }
+            }
+
+            Text(horizonStatusLine)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+        .disabled(isInteractionDisabled)
+    }
+
+    private var presetSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            panelTitle("Presets")
+
+            Picker("Preset Slot", selection: $bootstrap.selectedPresetSlot) {
+                ForEach(BootstrapViewModel.presetSlots, id: \.self) { slot in
+                    Text(slot.displayName).tag(slot)
+                }
+            }
+            .pickerStyle(.segmented)
+
+            Text(presetStatusLine)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+            HStack(spacing: 10) {
+                compactPanelButton("Save") {
+                    hapticLight()
+                    bootstrap.savePresetSelection()
+                }
+
+                compactPanelButton("Apply") {
+                    hapticLight()
+                    bootstrap.applyPresetSelection()
+                }
+                .disabled(!bootstrap.savedPresetSlots.contains(bootstrap.selectedPresetSlot))
+            }
+        }
+        .disabled(isInteractionDisabled)
+    }
+
+    private var captureModeSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            panelTitle("Capture Mode")
+
+            HStack(spacing: 8) {
+                modeSelectionButton(
+                    title: "Processed",
+                    format: .processed,
+                    tint: .blue
+                )
+
+                modeSelectionButton(
+                    title: "True RAW",
+                    format: .raw,
+                    tint: .green
+                )
+
+                modeSelectionButton(
+                    title: "Apple ProRAW",
+                    format: .appleProRAW,
+                    tint: .orange
+                )
+            }
+
+            Text(modeGuidePrimaryLine)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+        .disabled(isInteractionDisabled)
+    }
+
+    private var capabilitySection: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            panelTitle("Device Capability")
+
+            Text(rawCapabilityHeadline)
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(bootstrap.rawCaptureCapability.isSupported ? .green : .yellow)
+
+            if let rawCapabilityReason {
+                Text(rawCapabilityReason)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            Text(appleProRAWCapabilityHeadline)
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(bootstrap.rawCaptureCapability.isAppleProRAWSupported ? .green : .yellow)
+
+            if let appleProRAWCapabilityReason {
+                Text(appleProRAWCapabilityReason)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
+    }
+    #endif
+
+    // MARK: - Shared View Builders
+
+    @ViewBuilder
+    private func panelTitle(_ text: String) -> some View {
+        Text(text)
+            .font(.footnote.weight(.semibold))
+            .foregroundStyle(.white)
+    }
+
+    @ViewBuilder
+    private func compactPanelButton(_ title: String, action: @MainActor @escaping () -> Void) -> some View {
+        Button(title, action: action)
+            .buttonStyle(.bordered)
+            .frame(maxWidth: .infinity)
+    }
+
+    @ViewBuilder
+    private func utilityToggle(
+        symbol: String,
+        isActive: Bool,
+        label: String,
+        action: @MainActor @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            Image(systemName: symbol)
+                .font(.system(size: 15, weight: .medium))
+                .frame(width: 36, height: 36)
+                .foregroundStyle(isActive ? CaptureDesignTokens.accentColor : .white.opacity(0.85))
+                .background(
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .fill(isActive ? .white.opacity(0.12) : .clear)
+                )
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .disabled(isInteractionDisabled)
+        .accessibilityLabel(label)
+        .animation(.easeInOut(duration: 0.15), value: isActive)
+    }
+
+    // MARK: - Computed Properties
+
+    private var isInteractionDisabled: Bool {
+        bootstrap.isCapturingPhoto || bootstrap.isRecoveringSession
+    }
+
     private var buttonTitle: String {
         switch bootstrap.state {
         case .requestingPermission:
@@ -539,10 +797,6 @@ struct ContentView: View {
         default:
             return "Launch Camera"
         }
-    }
-
-    private func formattedByteCount(_ bytes: Int) -> String {
-        ByteCountFormatter.string(fromByteCount: Int64(bytes), countStyle: .file)
     }
 
     private var shutterButtonTitle: String {
@@ -555,6 +809,44 @@ struct ContentView: View {
         return "Shutter"
     }
 
+    private var isExposureAuto: Bool {
+        if case .auto = bootstrap.exposureState {
+            return true
+        }
+        return false
+    }
+
+    private var isWhiteBalanceAuto: Bool {
+        if case .auto = bootstrap.whiteBalanceState {
+            return true
+        }
+        return false
+    }
+
+    // MARK: - Actions
+
+    private func toggleExposureMode() {
+        if isExposureAuto {
+            bootstrap.applyCustomExposureSelection()
+        } else {
+            bootstrap.applyExposureAuto()
+        }
+    }
+
+    private func toggleWhiteBalanceMode() {
+        if isWhiteBalanceAuto {
+            bootstrap.applyWhiteBalanceLockSelection()
+        } else {
+            bootstrap.applyWhiteBalanceAuto()
+        }
+    }
+
+    // MARK: - Derived State
+
+    private func formattedByteCount(_ bytes: Int) -> String {
+        ByteCountFormatter.string(fromByteCount: Int64(bytes), countStyle: .file)
+    }
+
     @ViewBuilder
     private func modeSelectionButton(
         title: String,
@@ -563,13 +855,15 @@ struct ContentView: View {
     ) -> some View {
         let isSelected = bootstrap.selectedCaptureFormat == format
         let isSupported = isCaptureFormatSupported(format)
+
         Button(title) {
+            hapticLight()
             bootstrap.selectCaptureFormat(format)
         }
         .buttonStyle(.bordered)
         .tint(isSelected ? tint : nil)
         .opacity(isSupported || format == .processed ? 1.0 : 0.7)
-        .disabled(bootstrap.isCapturingPhoto || bootstrap.isRecoveringSession)
+        .disabled(isInteractionDisabled)
         .frame(maxWidth: .infinity)
     }
 
@@ -656,9 +950,9 @@ struct ContentView: View {
 
     private func formattedExposureCompensation(_ value: Double) -> String {
         if abs(value) < 0.000_1 {
-            return "0.0 EV"
+            return "0.0"
         }
-        return String(format: "%+.1f EV", value)
+        return String(format: "%+.1f", value)
     }
 
     private func formattedZebraThreshold(_ value: Double) -> String {
@@ -670,7 +964,7 @@ struct ContentView: View {
     }
 
     private var zebraStatusLine: String {
-        let stateDescription = bootstrap.isZebraOverlayEnabled ? "Enabled" : "Disabled"
+        let stateDescription = bootstrap.isZebraOverlayEnabled ? "Zebra enabled" : "Zebra disabled"
         if let zebraClippingOverlay = bootstrap.zebraClippingOverlay {
             let clippedPercent = Int((zebraClippingOverlay.clippedRatio * 100).rounded())
             return "\(stateDescription) · clipped area \(clippedPercent)%"
@@ -679,7 +973,7 @@ struct ContentView: View {
     }
 
     private var focusPeakingStatusLine: String {
-        let stateDescription = bootstrap.isFocusPeakingEnabled ? "Enabled" : "Disabled"
+        let stateDescription = bootstrap.isFocusPeakingEnabled ? "Peaking enabled" : "Peaking disabled"
         if let focusPeakingOverlay = bootstrap.focusPeakingOverlay {
             let peakedPercent = Int((focusPeakingOverlay.peakedRatio * 100).rounded())
             return "\(stateDescription) · peaked area \(peakedPercent)%"
@@ -747,6 +1041,44 @@ struct ContentView: View {
     }
 }
 
+// MARK: - Shutter Control Button
+
+private struct ShutterControlButton: View {
+    let isBusy: Bool
+    let action: @MainActor () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            ZStack {
+                Circle()
+                    .fill(.white.opacity(0.24))
+                    .frame(
+                        width: CaptureDesignTokens.shutterButtonOuterSize,
+                        height: CaptureDesignTokens.shutterButtonOuterSize
+                    )
+
+                Circle()
+                    .stroke(.white.opacity(0.75), lineWidth: 2)
+                    .frame(
+                        width: CaptureDesignTokens.shutterButtonOuterSize,
+                        height: CaptureDesignTokens.shutterButtonOuterSize
+                    )
+
+                Circle()
+                    .fill(isBusy ? .white.opacity(0.72) : .white.opacity(0.92))
+                    .frame(
+                        width: CaptureDesignTokens.shutterButtonInnerSize,
+                        height: CaptureDesignTokens.shutterButtonInnerSize
+                    )
+            }
+            .shadow(color: .black.opacity(0.35), radius: 10, x: 0, y: 3)
+        }
+        .buttonStyle(.plain)
+    }
+}
+
+// MARK: - Horizon Level Indicator
+
 private struct HorizonLevelIndicatorView: View {
     let rollDegrees: Double
     let levelToleranceDegrees: Double
@@ -757,29 +1089,23 @@ private struct HorizonLevelIndicatorView: View {
         let indicatorColor: Color = isLevel ? .green : .yellow
 
         ZStack {
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .fill(.black.opacity(0.58))
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .stroke(.white.opacity(0.18), lineWidth: 1)
+            RoundedRectangle(cornerRadius: 7, style: .continuous)
+                .fill(.black.opacity(0.35))
 
             Capsule()
-                .fill(.white.opacity(0.2))
-                .frame(width: 66, height: 2)
+                .fill(.white.opacity(0.15))
+                .frame(width: 40, height: 1.5)
 
             Capsule()
-                .fill(indicatorColor.opacity(0.92))
-                .frame(width: 66, height: 3)
+                .fill(indicatorColor.opacity(0.9))
+                .frame(width: 40, height: 2)
                 .rotationEffect(.degrees(-clampedRollDegrees))
-
-            Circle()
-                .fill(.white.opacity(0.85))
-                .frame(width: 6, height: 6)
         }
-        .overlay(alignment: .bottom) {
-            Text(String(format: "%+.1f°", rollDegrees))
-                .font(.caption2.weight(.semibold))
-                .foregroundStyle(indicatorColor.opacity(0.95))
-                .padding(.bottom, 2)
+        .overlay(alignment: .trailing) {
+            Text(String(format: "%.0f°", abs(rollDegrees)))
+                .font(.system(size: 8, weight: .semibold))
+                .foregroundStyle(indicatorColor.opacity(0.9))
+                .padding(.trailing, 3)
         }
         .accessibilityElement(children: .ignore)
         .accessibilityLabel("Horizon level indicator")
@@ -787,47 +1113,41 @@ private struct HorizonLevelIndicatorView: View {
     }
 }
 
+// MARK: - Luminance Histogram Overlay
+
 private struct LuminanceHistogramOverlayView: View {
     let histogram: LuminanceHistogram
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Text("Histogram")
-                .font(.caption2.weight(.semibold))
-                .foregroundStyle(.white.opacity(0.85))
-
-            GeometryReader { geometry in
-                let normalizedBins = histogram.normalizedBins
-                Canvas { context, size in
-                    guard !normalizedBins.isEmpty else { return }
-                    let barWidth = size.width / CGFloat(normalizedBins.count)
-                    for (index, normalizedValue) in normalizedBins.enumerated() {
-                        let clampedValue = min(max(normalizedValue, 0), 1)
-                        let barHeight = max(size.height * clampedValue, 1)
-                        let x = CGFloat(index) * barWidth
-                        let barRect = CGRect(
-                            x: x,
-                            y: size.height - barHeight,
-                            width: max(barWidth - 1, 0.5),
-                            height: barHeight
-                        )
-                        context.fill(Path(barRect), with: .color(.white.opacity(0.9)))
-                    }
+        GeometryReader { geometry in
+            let normalizedBins = histogram.normalizedBins
+            Canvas { context, size in
+                guard !normalizedBins.isEmpty else { return }
+                let barWidth = size.width / CGFloat(normalizedBins.count)
+                for (index, normalizedValue) in normalizedBins.enumerated() {
+                    let clampedValue = min(max(normalizedValue, 0), 1)
+                    let barHeight = max(size.height * clampedValue, 1)
+                    let x = CGFloat(index) * barWidth
+                    let barRect = CGRect(
+                        x: x,
+                        y: size.height - barHeight,
+                        width: max(barWidth - 1, 0.4),
+                        height: barHeight
+                    )
+                    context.fill(Path(barRect), with: .color(.white.opacity(0.85)))
                 }
-                .frame(width: geometry.size.width, height: geometry.size.height)
             }
+            .frame(width: geometry.size.width, height: geometry.size.height)
         }
-        .padding(.horizontal, 8)
-        .padding(.vertical, 6)
-        .background(.black.opacity(0.58), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .stroke(.white.opacity(0.18), lineWidth: 1)
-        )
+        .padding(.horizontal, 6)
+        .padding(.vertical, 4)
+        .background(.black.opacity(0.35), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
         .accessibilityElement(children: .ignore)
         .accessibilityLabel("Luminance histogram")
     }
 }
+
+// MARK: - Zebra Clipping Overlay
 
 private struct ZebraClippingOverlayView: View {
     let overlay: ZebraClippingOverlay
@@ -870,6 +1190,8 @@ private struct ZebraClippingOverlayView: View {
         .accessibilityLabel("Zebra clipping overlay")
     }
 }
+
+// MARK: - Focus Peaking Overlay
 
 private struct FocusPeakingOverlayView: View {
     let overlay: FocusPeakingOverlay
@@ -918,6 +1240,8 @@ private struct FocusPeakingOverlayView: View {
         .accessibilityLabel("Focus peaking overlay")
     }
 }
+
+// MARK: - Camera Preview
 
 #if canImport(UIKit) && canImport(AVFoundation)
 private struct CameraPreviewView: UIViewRepresentable {

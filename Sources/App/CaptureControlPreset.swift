@@ -9,11 +9,11 @@ public enum CapturePresetSlot: String, CaseIterable, Codable, Hashable, Sendable
     public var displayName: String {
         switch self {
         case .preset1:
-            return "Preset 1"
+            return "C1"
         case .preset2:
-            return "Preset 2"
+            return "C2"
         case .preset3:
-            return "Preset 3"
+            return "C3"
         }
     }
 }

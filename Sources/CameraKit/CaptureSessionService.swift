@@ -4,7 +4,7 @@ import Foundation
 import AVFoundation
 #endif
 
-public enum CaptureLensPosition: String, Equatable {
+public enum CaptureLensPosition: String, Equatable, Sendable {
     case back
     case front
 }
@@ -149,9 +149,9 @@ public protocol CaptureSessionBackend {
     #if canImport(AVFoundation)
     var previewSession: AVCaptureSession? { get }
     #endif
-    func startRunning() throws
-    func stopRunning()
-    func switchCamera() throws -> CaptureLensPosition
+    func startRunning() async throws
+    func stopRunning() async
+    func switchCamera() async throws -> CaptureLensPosition
     func capturePhoto() async throws -> Data
     func capturePhoto(format: CapturePhotoFormat) async throws -> Data
     func capturePhotoPayload(format: CapturePhotoFormat) async throws -> CapturedPhotoPayload
@@ -178,9 +178,9 @@ public protocol CaptureSessionServing {
     #if canImport(AVFoundation)
     var previewSession: AVCaptureSession? { get }
     #endif
-    func start() throws
-    func stop()
-    func switchCamera() throws
+    func start() async throws
+    func stop() async
+    func switchCamera() async throws
     func capturePhoto() async throws -> Data
     func capturePhoto(format: CapturePhotoFormat) async throws -> Data
     func capturePhotoPayload(format: CapturePhotoFormat) async throws -> CapturedPhotoPayload
@@ -323,9 +323,9 @@ public final class CaptureSessionService: CaptureSessionServing {
     }
     #endif
 
-    public func start() throws {
+    public func start() async throws {
         do {
-            try backend.startRunning()
+            try await backend.startRunning()
             let configuredExposureState = lock.withLock { exposureStateMachine.state }
             let appliedExposureState = try backend.applyExposureState(configuredExposureState)
             let configuredFocusState = lock.withLock { focusStateMachine.state }
@@ -364,8 +364,8 @@ public final class CaptureSessionService: CaptureSessionServing {
         }
     }
 
-    public func stop() {
-        backend.stopRunning()
+    public func stop() async {
+        await backend.stopRunning()
         lock.withLock {
             mutableState = .idle
         }
@@ -377,9 +377,9 @@ public final class CaptureSessionService: CaptureSessionServing {
         )
     }
 
-    public func switchCamera() throws {
+    public func switchCamera() async throws {
         do {
-            let newPosition = try backend.switchCamera()
+            let newPosition = try await backend.switchCamera()
             let configuredExposureState = lock.withLock { exposureStateMachine.state }
             let appliedExposureState = try backend.applyExposureState(configuredExposureState)
             let configuredFocusState = lock.withLock { focusStateMachine.state }
@@ -791,15 +791,15 @@ public final class SimulatedCaptureSessionBackend: CaptureSessionBackend {
     }
     #endif
 
-    public func startRunning() throws {
+    public func startRunning() async throws {
         isRunning = true
     }
 
-    public func stopRunning() {
+    public func stopRunning() async {
         isRunning = false
     }
 
-    public func switchCamera() throws -> CaptureLensPosition {
+    public func switchCamera() async throws -> CaptureLensPosition {
         activeLensPosition = activeLensPosition == .back ? .front : .back
         return activeLensPosition
     }
@@ -842,11 +842,14 @@ public final class SimulatedCaptureSessionBackend: CaptureSessionBackend {
     }
 }
 
-public final class AVCaptureSessionBackend: NSObject, CaptureSessionBackend {
+public final class AVCaptureSessionBackend: NSObject, CaptureSessionBackend, @unchecked Sendable {
     #if canImport(AVFoundation)
     private let session: AVCaptureSession
     private let photoOutput: AVCapturePhotoOutput
     private let videoDataOutput: AVCaptureVideoDataOutput
+    private let sessionQueue: DispatchQueue
+    private let sessionQueueKey = DispatchSpecificKey<UInt8>()
+    private let sessionQueueValue: UInt8 = 1
     private let videoDataOutputQueue: DispatchQueue
     private var isConfigured = false
     private let inFlightCaptureLock = NSLock()
@@ -872,11 +875,15 @@ public final class AVCaptureSessionBackend: NSObject, CaptureSessionBackend {
         self.session = AVCaptureSession()
         self.photoOutput = AVCapturePhotoOutput()
         self.videoDataOutput = AVCaptureVideoDataOutput()
+        self.sessionQueue = DispatchQueue(label: "CameraKit.CaptureSessionBackend.SessionQueue")
         self.videoDataOutputQueue = DispatchQueue(label: "CameraKit.PreviewAnalysisVideoDataOutput")
         #endif
         super.init()
         #if canImport(AVFoundation)
-        configureVideoDataOutput()
+        sessionQueue.setSpecific(key: sessionQueueKey, value: sessionQueueValue)
+        onSessionQueueSync {
+            configureVideoDataOutput()
+        }
         #endif
     }
 
@@ -886,17 +893,23 @@ public final class AVCaptureSessionBackend: NSObject, CaptureSessionBackend {
         self.session = AVCaptureSession()
         self.photoOutput = AVCapturePhotoOutput()
         self.videoDataOutput = AVCaptureVideoDataOutput()
+        self.sessionQueue = DispatchQueue(label: "CameraKit.CaptureSessionBackend.SessionQueue")
         self.videoDataOutputQueue = DispatchQueue(label: "CameraKit.PreviewAnalysisVideoDataOutput")
         #endif
         super.init()
         #if canImport(AVFoundation)
-        configureVideoDataOutput()
+        sessionQueue.setSpecific(key: sessionQueueKey, value: sessionQueueValue)
+        onSessionQueueSync {
+            configureVideoDataOutput()
+        }
         #endif
     }
 
     deinit {
         #if canImport(AVFoundation)
-        videoDataOutput.setSampleBufferDelegate(nil, queue: nil)
+        onSessionQueueSync {
+            videoDataOutput.setSampleBufferDelegate(nil, queue: nil)
+        }
         #endif
     }
 
@@ -906,38 +919,53 @@ public final class AVCaptureSessionBackend: NSObject, CaptureSessionBackend {
     }
     #endif
 
-    public func startRunning() throws {
+    public func startRunning() async throws {
         #if canImport(AVFoundation)
-        try configureSessionIfNeeded(for: activeLensPosition)
-        if !session.isRunning {
-            session.startRunning()
+        try await onSessionQueueAsync { [self] in
+            try configureSessionIfNeeded(for: activeLensPosition)
+            if !session.isRunning {
+                session.startRunning()
+            }
+            isRunning = true
         }
         #endif
+        #if !canImport(AVFoundation)
         isRunning = true
+        #endif
     }
 
-    public func stopRunning() {
+    public func stopRunning() async {
         #if canImport(AVFoundation)
-        if session.isRunning {
-            session.stopRunning()
+        await onSessionQueueAsync { [self] in
+            if session.isRunning {
+                session.stopRunning()
+            }
+            isRunning = false
         }
         #endif
+        #if !canImport(AVFoundation)
         isRunning = false
+        #endif
     }
 
-    public func switchCamera() throws -> CaptureLensPosition {
+    public func switchCamera() async throws -> CaptureLensPosition {
         let targetPosition: CaptureLensPosition = activeLensPosition == .back ? .front : .back
         #if canImport(AVFoundation)
-        guard cameraDevice(for: targetPosition) != nil else {
-            throw CaptureSessionError.cameraSwitchNotSupported
-        }
+        try await onSessionQueueAsync { [self] in
+            guard cameraDevice(for: targetPosition) != nil else {
+                throw CaptureSessionError.cameraSwitchNotSupported
+            }
 
-        try configureSession(for: targetPosition)
-        if isRunning, !session.isRunning {
-            session.startRunning()
+            try configureSession(for: targetPosition)
+            if isRunning, !session.isRunning {
+                session.startRunning()
+            }
+            activeLensPosition = targetPosition
         }
         #endif
+        #if !canImport(AVFoundation)
         activeLensPosition = targetPosition
+        #endif
         return activeLensPosition
     }
 
@@ -952,24 +980,27 @@ public final class AVCaptureSessionBackend: NSObject, CaptureSessionBackend {
 
     public func capturePhotoPayload(format: CapturePhotoFormat) async throws -> CapturedPhotoPayload {
         #if canImport(AVFoundation)
-        guard isRunning, session.isRunning else {
-            throw CaptureSessionError.backendFailure(message: "Capture session is not running.")
-        }
-
         return try await withCheckedThrowingContinuation { continuation in
             let completionBox = CaptureCompletionBox(continuation: continuation)
             let captureID = UUID()
-            let metadataSnapshot = captureMetadataSnapshot()
-            let processor = PhotoCaptureProcessor(
-                requestedFormat: format,
-                metadataSnapshot: metadataSnapshot
-            ) { [weak self] result in
-                self?.removeInFlightCapture(captureID)
-                completionBox.resume(with: result)
-            }
-            addInFlightCapture(processor, id: captureID)
+
             do {
-                photoOutput.capturePhoto(with: try makePhotoSettings(for: format), delegate: processor)
+                try onSessionQueueSync {
+                    guard isRunning, session.isRunning else {
+                        throw CaptureSessionError.backendFailure(message: "Capture session is not running.")
+                    }
+
+                    let metadataSnapshot = captureMetadataSnapshot()
+                    let processor = PhotoCaptureProcessor(
+                        requestedFormat: format,
+                        metadataSnapshot: metadataSnapshot
+                    ) { [weak self] result in
+                        self?.removeInFlightCapture(captureID)
+                        completionBox.resume(with: result)
+                    }
+                    addInFlightCapture(processor, id: captureID)
+                    photoOutput.capturePhoto(with: try makePhotoSettings(for: format), delegate: processor)
+                }
             } catch {
                 removeInFlightCapture(captureID)
                 completionBox.resume(with: .failure(error))
@@ -988,36 +1019,38 @@ public final class AVCaptureSessionBackend: NSObject, CaptureSessionBackend {
 
     public func rawCaptureCapability() -> RawCaptureCapability {
         #if canImport(AVFoundation)
-        do {
-            try configureSessionIfNeeded(for: activeLensPosition)
-        } catch {
+        onSessionQueueSync {
+            do {
+                try configureSessionIfNeeded(for: activeLensPosition)
+            } catch {
+                return RawCaptureCapability(
+                    isSupported: false,
+                    availableRawPhotoPixelFormatTypes: [],
+                    reason: "RAW capability check failed: \(String(describing: error))"
+                )
+            }
+
+            #if os(iOS) || targetEnvironment(macCatalyst) || os(tvOS)
+            let bayerFormatTypes: [UInt32] = photoOutput.availableRawPhotoPixelFormatTypes
+                .filter { AVCapturePhotoOutput.isBayerRAWPixelFormat($0) }
+                .map { UInt32($0) }
+            let appleProRAWFormatTypes: [UInt32] = photoOutput.availableRawPhotoPixelFormatTypes
+                .filter { AVCapturePhotoOutput.isAppleProRAWPixelFormat($0) }
+                .map { UInt32($0) }
+            #else
+            let bayerFormatTypes: [UInt32] = photoOutput.availableRawPhotoPixelFormatTypes.map { UInt32($0) }
+            let appleProRAWFormatTypes: [UInt32] = []
+            #endif
+
             return RawCaptureCapability(
-                isSupported: false,
-                availableRawPhotoPixelFormatTypes: [],
-                reason: "RAW capability check failed: \(String(describing: error))"
+                isSupported: !bayerFormatTypes.isEmpty,
+                availableRawPhotoPixelFormatTypes: bayerFormatTypes,
+                reason: bayerFormatTypes.isEmpty ? "No Bayer RAW pixel formats are available for the active camera configuration." : nil,
+                isAppleProRAWSupported: !appleProRAWFormatTypes.isEmpty,
+                availableAppleProRAWPhotoPixelFormatTypes: appleProRAWFormatTypes,
+                appleProRAWReason: appleProRAWFormatTypes.isEmpty ? "No Apple ProRAW pixel formats are available for the active camera configuration." : nil
             )
         }
-
-        #if os(iOS) || targetEnvironment(macCatalyst) || os(tvOS)
-        let bayerFormatTypes: [UInt32] = photoOutput.availableRawPhotoPixelFormatTypes
-            .filter { AVCapturePhotoOutput.isBayerRAWPixelFormat($0) }
-            .map { UInt32($0) }
-        let appleProRAWFormatTypes: [UInt32] = photoOutput.availableRawPhotoPixelFormatTypes
-            .filter { AVCapturePhotoOutput.isAppleProRAWPixelFormat($0) }
-            .map { UInt32($0) }
-        #else
-        let bayerFormatTypes: [UInt32] = photoOutput.availableRawPhotoPixelFormatTypes.map { UInt32($0) }
-        let appleProRAWFormatTypes: [UInt32] = []
-        #endif
-
-        return RawCaptureCapability(
-            isSupported: !bayerFormatTypes.isEmpty,
-            availableRawPhotoPixelFormatTypes: bayerFormatTypes,
-            reason: bayerFormatTypes.isEmpty ? "No Bayer RAW pixel formats are available for the active camera configuration." : nil,
-            isAppleProRAWSupported: !appleProRAWFormatTypes.isEmpty,
-            availableAppleProRAWPhotoPixelFormatTypes: appleProRAWFormatTypes,
-            appleProRAWReason: appleProRAWFormatTypes.isEmpty ? "No Apple ProRAW pixel formats are available for the active camera configuration." : nil
-        )
         #else
         return RawCaptureCapability(
             isSupported: false,
@@ -1029,37 +1062,39 @@ public final class AVCaptureSessionBackend: NSObject, CaptureSessionBackend {
 
     public func applyExposureState(_ state: ExposureControlState) throws -> ExposureControlState {
         #if canImport(AVFoundation)
-        try configureSessionIfNeeded(for: activeLensPosition)
-        guard let activeDevice = session.inputs.compactMap({ $0 as? AVCaptureDeviceInput }).first?.device else {
-            throw CaptureSessionError.backendFailure(message: "No active camera device is configured.")
-        }
-
-        do {
-            try activeDevice.lockForConfiguration()
-        } catch {
-            throw CaptureSessionError.backendFailure(
-                message: "Could not lock active camera device for exposure configuration."
-            )
-        }
-        defer { activeDevice.unlockForConfiguration() }
-
-        switch state {
-        case .auto:
-            if activeDevice.isExposureModeSupported(.continuousAutoExposure) {
-                activeDevice.exposureMode = .continuousAutoExposure
-                return .auto
+        try onSessionQueueSync {
+            try configureSessionIfNeeded(for: activeLensPosition)
+            guard let activeDevice = session.inputs.compactMap({ $0 as? AVCaptureDeviceInput }).first?.device else {
+                throw CaptureSessionError.backendFailure(message: "No active camera device is configured.")
             }
-            if activeDevice.isExposureModeSupported(.autoExpose) {
-                activeDevice.exposureMode = .autoExpose
-                return .auto
+
+            do {
+                try activeDevice.lockForConfiguration()
+            } catch {
+                throw CaptureSessionError.backendFailure(
+                    message: "Could not lock active camera device for exposure configuration."
+                )
             }
-            throw CaptureSessionError.backendFailure(
-                message: "Auto exposure is not supported by the active camera."
-            )
-        case let .locked(values):
-            return .locked(try applyManualExposure(values, to: activeDevice))
-        case let .custom(values):
-            return .custom(try applyManualExposure(values, to: activeDevice))
+            defer { activeDevice.unlockForConfiguration() }
+
+            switch state {
+            case .auto:
+                if activeDevice.isExposureModeSupported(.continuousAutoExposure) {
+                    activeDevice.exposureMode = .continuousAutoExposure
+                    return .auto
+                }
+                if activeDevice.isExposureModeSupported(.autoExpose) {
+                    activeDevice.exposureMode = .autoExpose
+                    return .auto
+                }
+                throw CaptureSessionError.backendFailure(
+                    message: "Auto exposure is not supported by the active camera."
+                )
+            case let .locked(values):
+                return .locked(try applyManualExposure(values, to: activeDevice))
+            case let .custom(values):
+                return .custom(try applyManualExposure(values, to: activeDevice))
+            }
         }
         #else
         return state
@@ -1068,35 +1103,37 @@ public final class AVCaptureSessionBackend: NSObject, CaptureSessionBackend {
 
     public func applyWhiteBalanceState(_ state: WhiteBalanceControlState) throws -> WhiteBalanceControlState {
         #if canImport(AVFoundation)
-        try configureSessionIfNeeded(for: activeLensPosition)
-        guard let activeDevice = session.inputs.compactMap({ $0 as? AVCaptureDeviceInput }).first?.device else {
-            throw CaptureSessionError.backendFailure(message: "No active camera device is configured.")
-        }
-
-        do {
-            try activeDevice.lockForConfiguration()
-        } catch {
-            throw CaptureSessionError.backendFailure(
-                message: "Could not lock active camera device for white balance configuration."
-            )
-        }
-        defer { activeDevice.unlockForConfiguration() }
-
-        switch state {
-        case .auto:
-            if activeDevice.isWhiteBalanceModeSupported(.continuousAutoWhiteBalance) {
-                activeDevice.whiteBalanceMode = .continuousAutoWhiteBalance
-                return .auto
+        try onSessionQueueSync {
+            try configureSessionIfNeeded(for: activeLensPosition)
+            guard let activeDevice = session.inputs.compactMap({ $0 as? AVCaptureDeviceInput }).first?.device else {
+                throw CaptureSessionError.backendFailure(message: "No active camera device is configured.")
             }
-            if activeDevice.isWhiteBalanceModeSupported(.autoWhiteBalance) {
-                activeDevice.whiteBalanceMode = .autoWhiteBalance
-                return .auto
+
+            do {
+                try activeDevice.lockForConfiguration()
+            } catch {
+                throw CaptureSessionError.backendFailure(
+                    message: "Could not lock active camera device for white balance configuration."
+                )
             }
-            throw CaptureSessionError.backendFailure(
-                message: "Auto white balance is not supported by the active camera."
-            )
-        case let .locked(values):
-            return .locked(try applyLockedWhiteBalance(values, to: activeDevice))
+            defer { activeDevice.unlockForConfiguration() }
+
+            switch state {
+            case .auto:
+                if activeDevice.isWhiteBalanceModeSupported(.continuousAutoWhiteBalance) {
+                    activeDevice.whiteBalanceMode = .continuousAutoWhiteBalance
+                    return .auto
+                }
+                if activeDevice.isWhiteBalanceModeSupported(.autoWhiteBalance) {
+                    activeDevice.whiteBalanceMode = .autoWhiteBalance
+                    return .auto
+                }
+                throw CaptureSessionError.backendFailure(
+                    message: "Auto white balance is not supported by the active camera."
+                )
+            case let .locked(values):
+                return .locked(try applyLockedWhiteBalance(values, to: activeDevice))
+            }
         }
         #else
         return state
@@ -1105,29 +1142,31 @@ public final class AVCaptureSessionBackend: NSObject, CaptureSessionBackend {
 
     public func applyExposureCompensation(_ value: Double) throws -> Double {
         #if canImport(AVFoundation)
-        try configureSessionIfNeeded(for: activeLensPosition)
-        guard let activeDevice = session.inputs.compactMap({ $0 as? AVCaptureDeviceInput }).first?.device else {
-            throw CaptureSessionError.backendFailure(message: "No active camera device is configured.")
-        }
+        try onSessionQueueSync {
+            try configureSessionIfNeeded(for: activeLensPosition)
+            guard let activeDevice = session.inputs.compactMap({ $0 as? AVCaptureDeviceInput }).first?.device else {
+                throw CaptureSessionError.backendFailure(message: "No active camera device is configured.")
+            }
 
-        #if os(iOS) || targetEnvironment(macCatalyst) || os(tvOS)
-        let range = Double(activeDevice.minExposureTargetBias)...Double(activeDevice.maxExposureTargetBias)
-        let clampedValue = min(max(value, range.lowerBound), range.upperBound)
-        do {
-            try activeDevice.lockForConfiguration()
-        } catch {
+            #if os(iOS) || targetEnvironment(macCatalyst) || os(tvOS)
+            let range = Double(activeDevice.minExposureTargetBias)...Double(activeDevice.maxExposureTargetBias)
+            let clampedValue = min(max(value, range.lowerBound), range.upperBound)
+            do {
+                try activeDevice.lockForConfiguration()
+            } catch {
+                throw CaptureSessionError.backendFailure(
+                    message: "Could not lock active camera device for EV compensation."
+                )
+            }
+            defer { activeDevice.unlockForConfiguration() }
+            activeDevice.setExposureTargetBias(Float(clampedValue), completionHandler: nil)
+            return clampedValue
+            #else
             throw CaptureSessionError.backendFailure(
-                message: "Could not lock active camera device for EV compensation."
+                message: "Exposure compensation controls are unavailable on this platform."
             )
+            #endif
         }
-        defer { activeDevice.unlockForConfiguration() }
-        activeDevice.setExposureTargetBias(Float(clampedValue), completionHandler: nil)
-        return clampedValue
-        #else
-        throw CaptureSessionError.backendFailure(
-            message: "Exposure compensation controls are unavailable on this platform."
-        )
-        #endif
         #else
         return value
         #endif
@@ -1135,19 +1174,21 @@ public final class AVCaptureSessionBackend: NSObject, CaptureSessionBackend {
 
     public func exposureCompensationRange() -> ClosedRange<Double>? {
         #if canImport(AVFoundation)
-        do {
-            try configureSessionIfNeeded(for: activeLensPosition)
-        } catch {
+        onSessionQueueSync {
+            do {
+                try configureSessionIfNeeded(for: activeLensPosition)
+            } catch {
+                return nil
+            }
+            guard let activeDevice = session.inputs.compactMap({ $0 as? AVCaptureDeviceInput }).first?.device else {
+                return nil
+            }
+            #if os(iOS) || targetEnvironment(macCatalyst) || os(tvOS)
+            return Double(activeDevice.minExposureTargetBias)...Double(activeDevice.maxExposureTargetBias)
+            #else
             return nil
+            #endif
         }
-        guard let activeDevice = session.inputs.compactMap({ $0 as? AVCaptureDeviceInput }).first?.device else {
-            return nil
-        }
-        #if os(iOS) || targetEnvironment(macCatalyst) || os(tvOS)
-        return Double(activeDevice.minExposureTargetBias)...Double(activeDevice.maxExposureTargetBias)
-        #else
-        return nil
-        #endif
         #else
         return nil
         #endif
@@ -1208,35 +1249,37 @@ public final class AVCaptureSessionBackend: NSObject, CaptureSessionBackend {
 
     public func applyFocusState(_ state: FocusControlState) throws -> FocusControlState {
         #if canImport(AVFoundation)
-        try configureSessionIfNeeded(for: activeLensPosition)
-        guard let activeDevice = session.inputs.compactMap({ $0 as? AVCaptureDeviceInput }).first?.device else {
-            throw CaptureSessionError.backendFailure(message: "No active camera device is configured.")
-        }
-
-        do {
-            try activeDevice.lockForConfiguration()
-        } catch {
-            throw CaptureSessionError.backendFailure(
-                message: "Could not lock active camera device for focus configuration."
-            )
-        }
-        defer { activeDevice.unlockForConfiguration() }
-
-        switch state {
-        case .auto:
-            if activeDevice.isFocusModeSupported(.continuousAutoFocus) {
-                activeDevice.focusMode = .continuousAutoFocus
-                return .auto
+        try onSessionQueueSync {
+            try configureSessionIfNeeded(for: activeLensPosition)
+            guard let activeDevice = session.inputs.compactMap({ $0 as? AVCaptureDeviceInput }).first?.device else {
+                throw CaptureSessionError.backendFailure(message: "No active camera device is configured.")
             }
-            if activeDevice.isFocusModeSupported(.autoFocus) {
-                activeDevice.focusMode = .autoFocus
-                return .auto
+
+            do {
+                try activeDevice.lockForConfiguration()
+            } catch {
+                throw CaptureSessionError.backendFailure(
+                    message: "Could not lock active camera device for focus configuration."
+                )
             }
-            throw CaptureSessionError.backendFailure(
-                message: "Auto focus is not supported by the active camera."
-            )
-        case let .locked(lensPosition):
-            return .locked(lensPosition: try applyLockedFocus(lensPosition, to: activeDevice))
+            defer { activeDevice.unlockForConfiguration() }
+
+            switch state {
+            case .auto:
+                if activeDevice.isFocusModeSupported(.continuousAutoFocus) {
+                    activeDevice.focusMode = .continuousAutoFocus
+                    return .auto
+                }
+                if activeDevice.isFocusModeSupported(.autoFocus) {
+                    activeDevice.focusMode = .autoFocus
+                    return .auto
+                }
+                throw CaptureSessionError.backendFailure(
+                    message: "Auto focus is not supported by the active camera."
+                )
+            case let .locked(lensPosition):
+                return .locked(lensPosition: try applyLockedFocus(lensPosition, to: activeDevice))
+            }
         }
         #else
         return state
@@ -1244,6 +1287,37 @@ public final class AVCaptureSessionBackend: NSObject, CaptureSessionBackend {
     }
 
     #if canImport(AVFoundation)
+    private func onSessionQueueSync<T>(_ body: () throws -> T) rethrows -> T {
+        if DispatchQueue.getSpecific(key: sessionQueueKey) == sessionQueueValue {
+            return try body()
+        }
+        return try sessionQueue.sync {
+            try body()
+        }
+    }
+
+    private func onSessionQueueAsync<T: Sendable>(_ body: @Sendable @escaping () throws -> T) async throws -> T {
+        try await withCheckedThrowingContinuation { continuation in
+            sessionQueue.async {
+                do {
+                    let result = try body()
+                    continuation.resume(returning: result)
+                } catch {
+                    continuation.resume(throwing: error)
+                }
+            }
+        }
+    }
+
+    private func onSessionQueueAsync(_ body: @Sendable @escaping () -> Void) async {
+        await withCheckedContinuation { continuation in
+            sessionQueue.async {
+                body()
+                continuation.resume()
+            }
+        }
+    }
+
     private func applyLockedFocus(_ lensPosition: Double, to device: AVCaptureDevice) throws -> Double {
         #if os(iOS) || targetEnvironment(macCatalyst) || os(tvOS)
         guard device.isFocusModeSupported(.locked) else {

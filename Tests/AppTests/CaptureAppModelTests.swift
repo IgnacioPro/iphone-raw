@@ -78,8 +78,8 @@ struct CaptureAppModelTests {
         )
 
         await model.bootstrap()
-        model.stopSession()
-        model.resumeSessionIfNeeded()
+        await model.stopSession()
+        await model.resumeSessionIfNeeded()
 
         #expect(model.bootState == .ready)
         #expect(sessionBackend.isRunning)
@@ -508,15 +508,15 @@ private final class StubCaptureBackend: CaptureSessionBackend {
     }
     #endif
 
-    func startRunning() throws {
+    func startRunning() async throws {
         isRunning = true
     }
 
-    func stopRunning() {
+    func stopRunning() async {
         isRunning = false
     }
 
-    func switchCamera() throws -> CaptureLensPosition {
+    func switchCamera() async throws -> CaptureLensPosition {
         activeLensPosition = activeLensPosition == .back ? .front : .back
         return activeLensPosition
     }

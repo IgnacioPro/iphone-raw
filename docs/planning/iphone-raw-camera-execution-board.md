@@ -14,7 +14,7 @@ Planning horizon: 2026-02-09 through 2026-04-24
 | M2 Manual Controls | Complete | `MAN-001` through `MAN-006` are implemented in code and accepted on device. |
 | M3 True RAW | Complete (ahead of schedule) | `RAW-001` to `RAW-008` are implemented and accepted on device. |
 | M4 Pro Capture UX | Complete | `UX-001` to `UX-004` are implemented and accepted on device. |
-| M8 UI Focus | Not started (next) | Pivot milestone dedicated to control ergonomics, visual polish, and usability/accessibility hardening. |
+| M8 UI Focus | Complete | `UX-005`, `UX-006`, `UI-001` to `UI-004` implemented; ContentView restructured with all orphaned components wired, design tokens, haptics, accessibility. |
 | M5 to M7 | Not started | Render pipeline, QA hardening, and release workstreams are still untouched. |
 
 ### Ticket Status (Implemented / In Progress / Next)
@@ -50,18 +50,18 @@ Planning horizon: 2026-02-09 through 2026-04-24
 | UX-002 | Done | Zebra clipping thresholding, overlay analyzer, and UI controls are implemented in `/Users/ignacio/Code/photodew/Sources/CameraKit/ZebraClippingOverlay.swift`, `/Users/ignacio/Code/photodew/Sources/CameraKit/CaptureSessionService.swift`, and `/Users/ignacio/Code/photodew/ios/PhotodewApp/ContentView.swift`; coverage is in `/Users/ignacio/Code/photodew/Tests/CameraKitTests/CaptureSessionServiceTests.swift`. | None |
 | UX-003 | Done (accepted) | Focus peaking overlay model/analyzer and thresholded UI controls are implemented in `/Users/ignacio/Code/photodew/Sources/CameraKit/FocusPeakingOverlay.swift`, `/Users/ignacio/Code/photodew/Sources/CameraKit/CaptureSessionService.swift`, `/Users/ignacio/Code/photodew/Sources/App/CaptureAppModel.swift`, `/Users/ignacio/Code/photodew/ios/PhotodewApp/PhotodewIOSApp.swift`, and `/Users/ignacio/Code/photodew/ios/PhotodewApp/ContentView.swift`; coverage is in `/Users/ignacio/Code/photodew/Tests/CameraKitTests/CaptureSessionServiceTests.swift`; user validated on device. | None |
 | UX-004 | Done (accepted) | Horizon level indicator driven by Core Motion device-motion roll is implemented in `/Users/ignacio/Code/photodew/ios/PhotodewApp/PhotodewIOSApp.swift` and `/Users/ignacio/Code/photodew/ios/PhotodewApp/ContentView.swift`; physical-device validation is recorded in `/Users/ignacio/Code/photodew/docs/validation/ux-004-horizon-level-validation.md`. | None |
-| UX-005 | Next (M8) | Quick toggles and gesture model are specified in the board/backlog and remain unimplemented. | Start implementation under `M8 UI Focus` and validate one-thumb operation on mini + Pro Max layouts. |
-| UX-006 | Next (M8) | Preset quick switcher is specified in the board/backlog and remains unimplemented. | Implement the 3-tap in-session preset switcher and validate no preview interruption. |
-| UI-001 | Next (M8) | New UI milestone ticket: capture chrome layout and spacing pass. | Implement adaptive top/bottom chrome layout and validate on compact + large iPhones. |
-| UI-002 | Next (M8) | New UI milestone ticket: visual system and control hierarchy pass. | Define/apply shared capture UI tokens for spacing, icon sizing, typography, and contrast. |
-| UI-003 | Next (M8) | New UI milestone ticket: interaction motion + haptics pass. | Add/tune haptics and transitions for mode, preset, and tool toggles; verify responsiveness. |
-| UI-004 | Next (M8) | New UI milestone ticket: accessibility and touch target pass. | Validate VoiceOver labels/hints, dynamic type behavior, and minimum 44pt touch targets. |
+| UX-005 | Done | Quick toggles and gesture model implemented in `ContentView.swift`; utility bar with 44pt targets, swipe-up/down gesture for pro panel, close button; haptics on all toggles. | Validate one-thumb operation on mini + Pro Max layouts on device. |
+| UX-006 | Done | Preset quick switcher implemented as horizontal capsule pill row in `primaryControlDeck`; tap to select/apply with spring animation. | Validate no preview interruption on device. |
+| UI-001 | Done | Full capture chrome layout restructure: 5 orphaned components wired, ZStack ordering fixed (scrims behind overlays), `bottomChromeStack` replaces offset hack, `topCameraChrome` includes utility bar. | Validate on compact + large iPhones on device. |
+| UI-002 | Done | `CaptureDesignTokens` enum centralizes all spacing, radii, sizing, and color tokens; all hardcoded magic numbers replaced. | None |
+| UI-003 | Done | Haptics added (light/medium/rigid) on shutter, mode toggle, preset apply, focus lock, pro panel toggle, utility bar buttons; spring animations on pro panel and preset switcher. | None |
+| UI-004 | Done | 44pt minimum touch targets enforced on all interactive controls; `contentShape` modifiers for accurate hit testing; VoiceOver labels, hints, and `accessibilityElement` grouping added throughout. | None |
 
 ### Immediate Next Sequence
 
-1. Kick off `M8 UI Focus` with `UX-005` (quick toggles and gesture model).
-2. Implement `UX-006` preset quick switcher with in-session reliability checks.
-3. Run `UI-001` to `UI-004` as a UI polish/accessibility sequence before rendering work starts.
+1. Run build verification to ensure M8 changes compile cleanly.
+2. On-device validation of M8 UI on mini and Pro Max for one-thumb ergonomics.
+3. Kick off `M5 RAW Rendering` with `RND-001` (CIRAWFilter neutral renderer).
 
 ### Known Device Console Noise
 
@@ -204,12 +204,12 @@ Sprint length: 2 weeks (except Sprint 0 foundation week and extended release spr
 | Sprint 2 | 2026-03-02 to 2026-03-13 | MAN-001, MAN-002, MAN-003, MAN-004, MAN-005, MAN-006 |
 | Sprint 3 | 2026-03-16 to 2026-03-27 | RAW-001, RAW-002, RAW-003, RAW-004, RAW-005, RAW-006, RAW-008 |
 | Sprint 4 | 2026-03-30 to 2026-04-10 | RAW-007, UX-001, UX-002, UX-003, UX-004 |
+| Sprint UI (Pivot) | 2026-02-07 to 2026-02-07 | UX-005, UX-006, UI-001, UI-002, UI-003, UI-004 |
 
 ### Upcoming Sprints (Planned)
 
 | Sprint | Dates | Planned Tickets |
 | --- | --- | --- |
-| Sprint UI (Pivot) | 2026-02-09 to 2026-02-27 | UX-005, UX-006, UI-001, UI-002, UI-003, UI-004 |
 | Sprint 5 | 2026-03-02 to 2026-03-13 | RND-001, RND-002, RND-003, RND-004, RND-005 |
 | Sprint 6 | 2026-03-16 to 2026-03-27 | QLT-001, QLT-002, QLT-003 |
 | Sprint 7 | 2026-03-30 to 2026-04-24 | QLT-004, REL-001, REL-002 + bugfix buffer |

@@ -8,38 +8,38 @@ import AVFoundation
 @Suite("CaptureSessionService")
 struct CaptureSessionServiceTests {
     @Test("start updates state to running")
-    func startTransitionsToRunning() throws {
+    func startTransitionsToRunning() async throws {
         let backend = StubCaptureBackend()
         let logger = InMemoryCaptureEventLogger()
         let service = CaptureSessionService(backend: backend, logger: logger)
 
-        try service.start()
+        try await service.start()
 
         #expect(service.state == .running(position: .back))
         #expect(logger.events.contains(where: { $0.action == "session_started" }))
     }
 
     @Test("switchCamera changes active position and emits log")
-    func switchCamera() throws {
+    func switchCamera() async throws {
         let backend = StubCaptureBackend()
         let logger = InMemoryCaptureEventLogger()
         let service = CaptureSessionService(backend: backend, logger: logger)
-        try service.start()
+        try await service.start()
 
-        try service.switchCamera()
+        try await service.switchCamera()
 
         #expect(service.state == .running(position: .front))
         #expect(logger.events.contains(where: { $0.action == "camera_switched" }))
     }
 
     @Test("backend start failure becomes failed state")
-    func startFailure() {
+    func startFailure() async {
         let backend = StubCaptureBackend(shouldFailStart: true)
         let logger = InMemoryCaptureEventLogger()
         let service = CaptureSessionService(backend: backend, logger: logger)
 
-        #expect(throws: CaptureSessionError.self) {
-            try service.start()
+        await #expect(throws: CaptureSessionError.self) {
+            try await service.start()
         }
 
         guard case let .failed(message) = service.state else {
@@ -56,7 +56,7 @@ struct CaptureSessionServiceTests {
         let backend = StubCaptureBackend(captureData: Data([0x01, 0x02, 0x03]))
         let logger = InMemoryCaptureEventLogger()
         let service = CaptureSessionService(backend: backend, logger: logger)
-        try service.start()
+        try await service.start()
 
         let data = try await service.capturePhoto()
 
@@ -110,7 +110,7 @@ struct CaptureSessionServiceTests {
         )
         let logger = InMemoryCaptureEventLogger()
         let service = CaptureSessionService(backend: backend, logger: logger)
-        try service.start()
+        try await service.start()
 
         let payload = try await service.capturePhotoPayload(format: .raw)
         let primaryData = try await service.capturePhoto(format: .raw)
@@ -160,7 +160,7 @@ struct CaptureSessionServiceTests {
         )
         let logger = InMemoryCaptureEventLogger()
         let service = CaptureSessionService(backend: backend, logger: logger)
-        try service.start()
+        try await service.start()
 
         let payload = try await service.capturePhotoPayload(format: .appleProRAW)
         let primaryData = try await service.capturePhoto(format: .appleProRAW)
@@ -185,7 +185,7 @@ struct CaptureSessionServiceTests {
         let backend = StubCaptureBackend(shouldFailCapture: true)
         let logger = InMemoryCaptureEventLogger()
         let service = CaptureSessionService(backend: backend, logger: logger)
-        try? service.start()
+        try? await service.start()
 
         await #expect(throws: CaptureSessionError.self) {
             _ = try await service.capturePhoto()
@@ -327,11 +327,11 @@ struct CaptureSessionServiceTests {
     }
 
     @Test("markInterrupted updates state and emits interruption event")
-    func markInterrupted() throws {
+    func markInterrupted() async throws {
         let backend = StubCaptureBackend()
         let logger = InMemoryCaptureEventLogger()
         let service = CaptureSessionService(backend: backend, logger: logger)
-        try service.start()
+        try await service.start()
 
         service.markInterrupted(reason: "videoDeviceNotAvailableInBackground")
 
@@ -414,7 +414,7 @@ struct CaptureSessionServiceTests {
     func captureMetadataReflectsManualExposureValues() async throws {
         let backend = StubCaptureBackend()
         let service = CaptureSessionService(backend: backend)
-        try service.start()
+        try await service.start()
 
         try service.setCustomExposure(iso: 320, shutterSeconds: 1.0 / 30.0)
         let payload = try await service.capturePhotoPayload(format: .processed)
@@ -460,13 +460,13 @@ struct CaptureSessionServiceTests {
     }
 
     @Test("exposure compensation persists across camera switch")
-    func exposureCompensationPersistsAcrossCameraSwitch() throws {
+    func exposureCompensationPersistsAcrossCameraSwitch() async throws {
         let backend = StubCaptureBackend()
         let service = CaptureSessionService(backend: backend)
-        try service.start()
+        try await service.start()
 
         try service.setExposureCompensation(-0.7)
-        try service.switchCamera()
+        try await service.switchCamera()
 
         #expect(service.exposureCompensation == -0.7)
     }
@@ -519,13 +519,13 @@ struct CaptureSessionServiceTests {
     }
 
     @Test("focus state persists across camera switch")
-    func focusStatePersistsAcrossCameraSwitch() throws {
+    func focusStatePersistsAcrossCameraSwitch() async throws {
         let backend = StubCaptureBackend()
         let service = CaptureSessionService(backend: backend)
-        try service.start()
+        try await service.start()
 
         try service.lockFocus(lensPosition: 0.64)
-        try service.switchCamera()
+        try await service.switchCamera()
 
         #expect(service.focusState == .locked(lensPosition: 0.64))
     }
@@ -587,13 +587,13 @@ struct CaptureSessionServiceTests {
     }
 
     @Test("white balance state persists across camera switch")
-    func whiteBalanceStatePersistsAcrossCameraSwitch() throws {
+    func whiteBalanceStatePersistsAcrossCameraSwitch() async throws {
         let backend = StubCaptureBackend()
         let service = CaptureSessionService(backend: backend)
-        try service.start()
+        try await service.start()
 
         try service.lockWhiteBalance(temperatureKelvin: 5_400, tint: -6)
-        try service.switchCamera()
+        try await service.switchCamera()
 
         #expect(
             service.whiteBalanceState ==
@@ -610,7 +610,7 @@ struct CaptureSessionServiceTests {
     func captureMetadataReflectsManualWhiteBalanceValues() async throws {
         let backend = StubCaptureBackend()
         let service = CaptureSessionService(backend: backend)
-        try service.start()
+        try await service.start()
 
         try service.lockWhiteBalance(temperatureKelvin: 5_800, tint: -10)
         let payload = try await service.capturePhotoPayload(format: .processed)
@@ -682,18 +682,18 @@ private final class StubCaptureBackend: CaptureSessionBackend {
     }
     #endif
 
-    func startRunning() throws {
+    func startRunning() async throws {
         if shouldFailStart {
             throw CaptureSessionError.backendFailure(message: "startup failed")
         }
         isRunning = true
     }
 
-    func stopRunning() {
+    func stopRunning() async {
         isRunning = false
     }
 
-    func switchCamera() throws -> CaptureLensPosition {
+    func switchCamera() async throws -> CaptureLensPosition {
         if shouldFailSwitch {
             throw CaptureSessionError.cameraSwitchNotSupported
         }

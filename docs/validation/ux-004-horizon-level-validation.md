@@ -1,7 +1,7 @@
 # UX-004 Horizon Level Indicator Validation
 
 Last updated: 2026-02-07
-Status: Pending on-device validation
+Status: Completed (accepted via manual on-device validation on 2026-02-07)
 
 ## Goal
 
@@ -10,7 +10,8 @@ Validate that the horizon level indicator tracks roll/tilt with low lag and give
 ## Validation Summary
 
 - Code implementation and build/test checks are complete.
-- Physical-device validation is required for acceptance.
+- Manual physical-device validation completed by user.
+- Ticket accepted as done by user decision.
 
 ## Implemented Behavior
 

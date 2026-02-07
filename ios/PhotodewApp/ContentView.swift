@@ -85,6 +85,13 @@ struct ContentView: View {
                             .foregroundStyle(.secondary)
                     }
 
+                    if let lastSaveStatusMessage = bootstrap.lastSaveStatusMessage {
+                        Text(lastSaveStatusMessage)
+                            .font(.footnote)
+                            .foregroundStyle(.green)
+                            .multilineTextAlignment(.center)
+                    }
+
                     if let lastCaptureError = bootstrap.lastCaptureError {
                         Text("Capture error: \(lastCaptureError)")
                             .font(.footnote)

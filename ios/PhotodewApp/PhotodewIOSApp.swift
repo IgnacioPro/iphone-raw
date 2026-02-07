@@ -57,6 +57,7 @@ final class BootstrapViewModel: ObservableObject {
     @Published private(set) var exposureCompensationRange: ClosedRange<Double> = -2...2
     @Published private(set) var focusState: FocusControlState = .auto
     @Published private(set) var whiteBalanceState: WhiteBalanceControlState = .auto
+    @Published private(set) var luminanceHistogram: LuminanceHistogram?
     @Published var selectedExposureISO: Double = 100
     @Published var selectedExposureShutterSeconds: Double = 1.0 / 125.0
     @Published var selectedExposureCompensation: Double = 0
@@ -78,11 +79,13 @@ final class BootstrapViewModel: ObservableObject {
     private var activeCaptureID: UUID?
     private var lastSavedLocalIdentifiers: [String] = []
     private var dismissSaveToastTask: Task<Void, Never>?
+    private var lastHistogramPublishedAt: Date?
     #if canImport(AVFoundation)
     private var sessionNotificationObservers: [NSObjectProtocol] = []
     private weak var observedCaptureSession: AVCaptureSession?
     #endif
     private static let lowStorageThresholdBytes: Int64 = 5_000_000_000
+    private static let minimumHistogramUpdateIntervalSeconds: TimeInterval = 1.0 / 12.0
     static let manualISOOptions: [Double] = [25, 50, 64, 80, 100, 125, 160, 200, 320, 400, 640, 800, 1_250]
     static let manualShutterOptions: [Double] = [
         1.0 / 1_000.0,
@@ -121,6 +124,7 @@ final class BootstrapViewModel: ObservableObject {
             appleProRAWReason: "Apple ProRAW capability checks require a physical iPhone camera."
         )
         selectedCaptureFormat = .processed
+        resetLuminanceHistogramUpdates()
         return
         #else
         await model.bootstrap()
@@ -133,6 +137,7 @@ final class BootstrapViewModel: ObservableObject {
         refreshStoragePressureWarning()
         refreshPresetState()
         configureSessionObserversIfNeeded()
+        configureLuminanceHistogramUpdatesIfNeeded()
         #endif
     }
 
@@ -158,6 +163,7 @@ final class BootstrapViewModel: ObservableObject {
         savedPresetSlots = []
         selectedPresetSavedAt = nil
         storagePressureWarning = nil
+        resetLuminanceHistogramUpdates()
         removeSessionObservers()
     }
 
@@ -172,6 +178,7 @@ final class BootstrapViewModel: ObservableObject {
         refreshStoragePressureWarning()
         refreshPresetState()
         configureSessionObserversIfNeeded()
+        configureLuminanceHistogramUpdatesIfNeeded()
     }
 
     func capturePhoto() async {
@@ -456,6 +463,7 @@ final class BootstrapViewModel: ObservableObject {
         refreshStoragePressureWarning()
         refreshPresetState()
         configureSessionObserversIfNeeded()
+        configureLuminanceHistogramUpdatesIfNeeded()
 
         if case .ready = state {
             if trigger == "manual_retry" || trigger == "session_runtime_error" || trigger == "session_interruption_ended" {
@@ -681,6 +689,35 @@ final class BootstrapViewModel: ObservableObject {
                 lastCaptureError = captureErrorMessage(from: error)
             }
         }
+    }
+
+    private func configureLuminanceHistogramUpdatesIfNeeded() {
+        guard case .ready = state else {
+            resetLuminanceHistogramUpdates()
+            return
+        }
+        model.setLuminanceHistogramHandler { [weak self] histogram in
+            guard let self else { return }
+            Task { @MainActor in
+                self.applyLuminanceHistogram(histogram)
+            }
+        }
+    }
+
+    private func resetLuminanceHistogramUpdates() {
+        model.setLuminanceHistogramHandler(nil)
+        lastHistogramPublishedAt = nil
+        luminanceHistogram = nil
+    }
+
+    private func applyLuminanceHistogram(_ histogram: LuminanceHistogram) {
+        let now = Date()
+        if let lastHistogramPublishedAt,
+           now.timeIntervalSince(lastHistogramPublishedAt) < Self.minimumHistogramUpdateIntervalSeconds {
+            return
+        }
+        self.lastHistogramPublishedAt = now
+        luminanceHistogram = histogram
     }
 
     #if canImport(AVFoundation)

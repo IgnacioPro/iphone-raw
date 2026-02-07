@@ -62,6 +62,10 @@ struct ContentView: View {
                 HStack {
                     CaptureStatusView(state: bootstrap.state)
                     Spacer(minLength: 0)
+                    if let luminanceHistogram = bootstrap.luminanceHistogram {
+                        LuminanceHistogramOverlayView(histogram: luminanceHistogram)
+                            .frame(width: 156, height: 62)
+                    }
                 }
                 .padding(.horizontal, 16)
                 .padding(.top, 8)
@@ -593,6 +597,48 @@ struct ContentView: View {
             return "\(bootstrap.selectedPresetSlot.displayName) saved \(savedAt.formatted(date: .abbreviated, time: .shortened))."
         }
         return "\(bootstrap.selectedPresetSlot.displayName) is empty."
+    }
+}
+
+private struct LuminanceHistogramOverlayView: View {
+    let histogram: LuminanceHistogram
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text("Histogram")
+                .font(.caption2.weight(.semibold))
+                .foregroundStyle(.white.opacity(0.85))
+
+            GeometryReader { geometry in
+                let normalizedBins = histogram.normalizedBins
+                Canvas { context, size in
+                    guard !normalizedBins.isEmpty else { return }
+                    let barWidth = size.width / CGFloat(normalizedBins.count)
+                    for (index, normalizedValue) in normalizedBins.enumerated() {
+                        let clampedValue = min(max(normalizedValue, 0), 1)
+                        let barHeight = max(size.height * clampedValue, 1)
+                        let x = CGFloat(index) * barWidth
+                        let barRect = CGRect(
+                            x: x,
+                            y: size.height - barHeight,
+                            width: max(barWidth - 1, 0.5),
+                            height: barHeight
+                        )
+                        context.fill(Path(barRect), with: .color(.white.opacity(0.9)))
+                    }
+                }
+                .frame(width: geometry.size.width, height: geometry.size.height)
+            }
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 6)
+        .background(.black.opacity(0.58), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .stroke(.white.opacity(0.18), lineWidth: 1)
+        )
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("Luminance histogram")
     }
 }
 

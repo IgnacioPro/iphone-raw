@@ -131,6 +131,10 @@ public final class CaptureAppModel {
         sessionService.rawCaptureCapability()
     }
 
+    public func setLuminanceHistogramHandler(_ handler: LuminanceHistogramHandler?) {
+        sessionService.setLuminanceHistogramHandler(handler)
+    }
+
     public func exposureState() -> ExposureControlState {
         sessionService.exposureState
     }

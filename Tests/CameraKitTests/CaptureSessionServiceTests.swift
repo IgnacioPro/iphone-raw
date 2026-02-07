@@ -224,6 +224,34 @@ struct CaptureSessionServiceTests {
         #expect(service.rawCaptureCapability() == expected)
     }
 
+    @Test("luminance histogram handler receives backend updates")
+    func luminanceHistogramHandlerReceivesBackendUpdates() {
+        let backend = StubCaptureBackend()
+        let service = CaptureSessionService(backend: backend)
+        let collector = HistogramCollector()
+        service.setLuminanceHistogramHandler { histogram in
+            collector.append(histogram)
+        }
+
+        let histogram = LuminanceHistogram(
+            bins: [0, 3, 6, 9],
+            sampleCount: 18
+        )
+        backend.emitLuminanceHistogram(histogram)
+
+        #expect(collector.snapshot() == [histogram])
+    }
+
+    @Test("luminance histogram normalized bins scale to unit range")
+    func luminanceHistogramNormalizedBins() {
+        let histogram = LuminanceHistogram(
+            bins: [0, 2, 4, 8],
+            sampleCount: 14
+        )
+
+        #expect(histogram.normalizedBins == [0.0, 0.25, 0.5, 1.0])
+    }
+
     @Test("markInterrupted updates state and emits interruption event")
     func markInterrupted() throws {
         let backend = StubCaptureBackend()
@@ -541,6 +569,7 @@ private final class StubCaptureBackend: CaptureSessionBackend {
     private var exposureCompensation: Double = 0
     private var focusState: FocusControlState = .auto
     private var whiteBalanceState: WhiteBalanceControlState = .auto
+    private var luminanceHistogramHandler: LuminanceHistogramHandler?
 
     init(
         shouldFailStart: Bool = false,
@@ -700,5 +729,31 @@ private final class StubCaptureBackend: CaptureSessionBackend {
         }
         whiteBalanceState = state
         return whiteBalanceState
+    }
+
+    func setLuminanceHistogramHandler(_ handler: LuminanceHistogramHandler?) {
+        luminanceHistogramHandler = handler
+    }
+
+    func emitLuminanceHistogram(_ histogram: LuminanceHistogram) {
+        luminanceHistogramHandler?(histogram)
+    }
+}
+
+private final class HistogramCollector: @unchecked Sendable {
+    private let lock = NSLock()
+    private var histograms: [LuminanceHistogram] = []
+
+    func append(_ histogram: LuminanceHistogram) {
+        lock.lock()
+        histograms.append(histogram)
+        lock.unlock()
+    }
+
+    func snapshot() -> [LuminanceHistogram] {
+        lock.lock()
+        let values = histograms
+        lock.unlock()
+        return values
     }
 }

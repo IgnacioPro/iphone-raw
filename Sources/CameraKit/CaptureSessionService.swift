@@ -47,6 +47,8 @@ public enum CapturePhotoFormat: String, Equatable, Sendable {
     case appleProRAW
 }
 
+public typealias LuminanceHistogramHandler = @Sendable (LuminanceHistogram) -> Void
+
 public struct CapturedPhotoPayload: Equatable, Sendable {
     public let processedData: Data?
     public let rawData: Data?
@@ -159,6 +161,7 @@ public protocol CaptureSessionBackend {
     func applyWhiteBalanceState(_ state: WhiteBalanceControlState) throws -> WhiteBalanceControlState
     func applyExposureCompensation(_ value: Double) throws -> Double
     func exposureCompensationRange() -> ClosedRange<Double>?
+    func setLuminanceHistogramHandler(_ handler: LuminanceHistogramHandler?)
 }
 
 public protocol CaptureSessionServing {
@@ -188,6 +191,7 @@ public protocol CaptureSessionServing {
     func lockWhiteBalance(temperatureKelvin: Double, tint: Double) throws
     func setExposureCompensation(_ value: Double) throws
     func resetExposureCompensation() throws
+    func setLuminanceHistogramHandler(_ handler: LuminanceHistogramHandler?)
 }
 
 public extension CaptureSessionBackend {
@@ -233,6 +237,8 @@ public extension CaptureSessionBackend {
     func exposureCompensationRange() -> ClosedRange<Double>? {
         nil
     }
+
+    func setLuminanceHistogramHandler(_ handler: LuminanceHistogramHandler?) {}
 }
 
 public extension CaptureSessionServing {
@@ -540,6 +546,10 @@ public final class CaptureSessionService: CaptureSessionServing {
         backend.rawCaptureCapability()
     }
 
+    public func setLuminanceHistogramHandler(_ handler: LuminanceHistogramHandler?) {
+        backend.setLuminanceHistogramHandler(handler)
+    }
+
     private static func captureLatencyMilliseconds(from start: Date, to end: Date) -> Int {
         max(Int((end.timeIntervalSince(start) * 1_000).rounded()), 0)
     }
@@ -800,23 +810,53 @@ public final class SimulatedCaptureSessionBackend: CaptureSessionBackend {
     }
 }
 
-public final class AVCaptureSessionBackend: CaptureSessionBackend {
+public final class AVCaptureSessionBackend: NSObject, CaptureSessionBackend {
     #if canImport(AVFoundation)
     private let session: AVCaptureSession
     private let photoOutput: AVCapturePhotoOutput
+    private let videoDataOutput: AVCaptureVideoDataOutput
+    private let videoDataOutputQueue: DispatchQueue
     private var isConfigured = false
     private let inFlightCaptureLock = NSLock()
     private var inFlightCaptures: [UUID: PhotoCaptureProcessor] = [:]
+    private let histogramHandlerLock = NSLock()
+    private var histogramHandler: LuminanceHistogramHandler?
     #endif
 
     public private(set) var isRunning = false
     public private(set) var activeLensPosition: CaptureLensPosition
+
+    public override init() {
+        self.activeLensPosition = .back
+        #if canImport(AVFoundation)
+        self.session = AVCaptureSession()
+        self.photoOutput = AVCapturePhotoOutput()
+        self.videoDataOutput = AVCaptureVideoDataOutput()
+        self.videoDataOutputQueue = DispatchQueue(label: "CameraKit.HistogramVideoDataOutput")
+        #endif
+        super.init()
+        #if canImport(AVFoundation)
+        configureVideoDataOutput()
+        #endif
+    }
 
     public init(initialPosition: CaptureLensPosition = .back) {
         self.activeLensPosition = initialPosition
         #if canImport(AVFoundation)
         self.session = AVCaptureSession()
         self.photoOutput = AVCapturePhotoOutput()
+        self.videoDataOutput = AVCaptureVideoDataOutput()
+        self.videoDataOutputQueue = DispatchQueue(label: "CameraKit.HistogramVideoDataOutput")
+        #endif
+        super.init()
+        #if canImport(AVFoundation)
+        configureVideoDataOutput()
+        #endif
+    }
+
+    deinit {
+        #if canImport(AVFoundation)
+        videoDataOutput.setSampleBufferDelegate(nil, queue: nil)
         #endif
     }
 
@@ -1073,6 +1113,14 @@ public final class AVCaptureSessionBackend: CaptureSessionBackend {
         #endif
     }
 
+    public func setLuminanceHistogramHandler(_ handler: LuminanceHistogramHandler?) {
+        #if canImport(AVFoundation)
+        histogramHandlerLock.withLock {
+            histogramHandler = handler
+        }
+        #endif
+    }
+
     public func applyFocusState(_ state: FocusControlState) throws -> FocusControlState {
         #if canImport(AVFoundation)
         try configureSessionIfNeeded(for: activeLensPosition)
@@ -1251,12 +1299,49 @@ public final class AVCaptureSessionBackend: CaptureSessionBackend {
             }
             session.addOutput(photoOutput)
         }
+        if !session.outputs.contains(where: { $0 === videoDataOutput }) {
+            guard session.canAddOutput(videoDataOutput) else {
+                throw CaptureSessionError.backendFailure(message: "Cannot add video data output to capture session.")
+            }
+            session.addOutput(videoDataOutput)
+        }
         #if os(iOS) || targetEnvironment(macCatalyst) || os(tvOS)
         if photoOutput.isAppleProRAWSupported, !photoOutput.isAppleProRAWEnabled {
             photoOutput.isAppleProRAWEnabled = true
         }
         #endif
         isConfigured = true
+    }
+
+    private func configureVideoDataOutput() {
+        videoDataOutput.alwaysDiscardsLateVideoFrames = true
+        let pixelFormatType = preferredHistogramPixelFormatType()
+        videoDataOutput.videoSettings = [
+            kCVPixelBufferPixelFormatTypeKey as String: NSNumber(value: pixelFormatType)
+        ]
+        videoDataOutput.setSampleBufferDelegate(self, queue: videoDataOutputQueue)
+    }
+
+    private func preferredHistogramPixelFormatType() -> OSType {
+        let preferredPixelFormatTypes: [OSType] = [
+            kCVPixelFormatType_420YpCbCr8BiPlanarFullRange,
+            kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange,
+            kCVPixelFormatType_32BGRA,
+        ]
+        let supportedPixelFormatTypes = Set(videoDataOutput.availableVideoPixelFormatTypes)
+        return preferredPixelFormatTypes.first(where: { supportedPixelFormatTypes.contains($0) })
+            ?? kCVPixelFormatType_420YpCbCr8BiPlanarFullRange
+    }
+
+    private func dispatchHistogramIfNeeded(from sampleBuffer: CMSampleBuffer) {
+        guard let histogramHandler = histogramHandlerLock.withLock({ histogramHandler }) else {
+            return
+        }
+        guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer),
+              let histogram = LuminanceHistogramAnalyzer.histogram(from: pixelBuffer) else {
+            return
+        }
+        histogramHandler(histogram)
     }
 
     private func cameraDevice(for position: CaptureLensPosition) -> AVCaptureDevice? {
@@ -1514,6 +1599,116 @@ public final class AVCaptureSessionBackend: CaptureSessionBackend {
 }
 
 #if canImport(AVFoundation)
+extension AVCaptureSessionBackend: AVCaptureVideoDataOutputSampleBufferDelegate {
+    public func captureOutput(
+        _ output: AVCaptureOutput,
+        didOutput sampleBuffer: CMSampleBuffer,
+        from connection: AVCaptureConnection
+    ) {
+        guard output === videoDataOutput else { return }
+        dispatchHistogramIfNeeded(from: sampleBuffer)
+    }
+}
+
+private enum LuminanceHistogramAnalyzer {
+    static let binCount = LuminanceHistogram.defaultBinCount
+    static let sampleStride = 4
+
+    static func histogram(from pixelBuffer: CVPixelBuffer) -> LuminanceHistogram? {
+        CVPixelBufferLockBaseAddress(pixelBuffer, .readOnly)
+        defer { CVPixelBufferUnlockBaseAddress(pixelBuffer, .readOnly) }
+
+        var bins = Array(repeating: UInt32(0), count: binCount)
+        var sampleCount: UInt32 = 0
+
+        let planeCount = CVPixelBufferGetPlaneCount(pixelBuffer)
+        if planeCount > 0 {
+            guard let baseAddress = CVPixelBufferGetBaseAddressOfPlane(pixelBuffer, 0) else {
+                return nil
+            }
+            let width = CVPixelBufferGetWidthOfPlane(pixelBuffer, 0)
+            let height = CVPixelBufferGetHeightOfPlane(pixelBuffer, 0)
+            let bytesPerRow = CVPixelBufferGetBytesPerRowOfPlane(pixelBuffer, 0)
+            accumulateLuminanceBins(
+                fromPlanarLumaBaseAddress: baseAddress,
+                width: width,
+                height: height,
+                bytesPerRow: bytesPerRow,
+                into: &bins,
+                sampleCount: &sampleCount
+            )
+        } else {
+            guard CVPixelBufferGetPixelFormatType(pixelBuffer) == kCVPixelFormatType_32BGRA,
+                  let baseAddress = CVPixelBufferGetBaseAddress(pixelBuffer) else {
+                return nil
+            }
+            let width = CVPixelBufferGetWidth(pixelBuffer)
+            let height = CVPixelBufferGetHeight(pixelBuffer)
+            let bytesPerRow = CVPixelBufferGetBytesPerRow(pixelBuffer)
+            accumulateLuminanceBins(
+                fromBGRABaseAddress: baseAddress,
+                width: width,
+                height: height,
+                bytesPerRow: bytesPerRow,
+                into: &bins,
+                sampleCount: &sampleCount
+            )
+        }
+
+        guard sampleCount > 0 else { return nil }
+        return LuminanceHistogram(
+            bins: bins,
+            sampleCount: sampleCount,
+            generatedAt: Date()
+        )
+    }
+
+    private static func accumulateLuminanceBins(
+        fromPlanarLumaBaseAddress baseAddress: UnsafeMutableRawPointer,
+        width: Int,
+        height: Int,
+        bytesPerRow: Int,
+        into bins: inout [UInt32],
+        sampleCount: inout UInt32
+    ) {
+        let lumaBuffer = baseAddress.assumingMemoryBound(to: UInt8.self)
+        for y in stride(from: 0, to: height, by: sampleStride) {
+            let rowPointer = lumaBuffer.advanced(by: y * bytesPerRow)
+            for x in stride(from: 0, to: width, by: sampleStride) {
+                let luminance = rowPointer[x]
+                let binIndex = min((Int(luminance) * binCount) >> 8, binCount - 1)
+                bins[binIndex] += 1
+                sampleCount += 1
+            }
+        }
+    }
+
+    private static func accumulateLuminanceBins(
+        fromBGRABaseAddress baseAddress: UnsafeMutableRawPointer,
+        width: Int,
+        height: Int,
+        bytesPerRow: Int,
+        into bins: inout [UInt32],
+        sampleCount: inout UInt32
+    ) {
+        let bgraBuffer = baseAddress.assumingMemoryBound(to: UInt8.self)
+        for y in stride(from: 0, to: height, by: sampleStride) {
+            let rowPointer = bgraBuffer.advanced(by: y * bytesPerRow)
+            for x in stride(from: 0, to: width, by: sampleStride) {
+                let pixelOffset = x * 4
+                let blue = Int(rowPointer[pixelOffset])
+                let green = Int(rowPointer[pixelOffset + 1])
+                let red = Int(rowPointer[pixelOffset + 2])
+                // Integer BT.709 approximation.
+                let luminance = (54 * red + 183 * green + 19 * blue) >> 8
+                let binIndex = min((luminance * binCount) >> 8, binCount - 1)
+                bins[binIndex] += 1
+                sampleCount += 1
+            }
+        }
+    }
+}
+
 private final class CaptureCompletionBox: @unchecked Sendable {
     private let lock = NSLock()
     private var continuation: CheckedContinuation<CapturedPhotoPayload, Error>?

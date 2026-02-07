@@ -104,7 +104,8 @@ struct CaptureAppModelTests {
             localIdentifier: "A1B2-C3D4",
             capturedAt: capturedAt,
             lensPosition: .front,
-            byteCount: 4_200
+            byteCount: 4_200,
+            captureFormat: .raw
         )
 
         let artifacts = await metadataStore.fetchAll()
@@ -121,6 +122,7 @@ struct CaptureAppModelTests {
         #expect(artifact.metadata["captured_at"] == capturedAt.ISO8601Format())
         #expect(artifact.metadata["lens_position"] == "front")
         #expect(artifact.metadata["byte_count"] == "4200")
+        #expect(artifact.metadata["capture_format"] == "raw")
     }
 
     @Test("rawCaptureCapability exposes service capability state")

@@ -32,10 +32,16 @@ public struct RawCaptureCapability: Equatable, Sendable {
     }
 }
 
+public enum CapturePhotoFormat: String, Equatable, Sendable {
+    case processed
+    case raw
+}
+
 public enum CaptureSessionError: Error, Equatable, LocalizedError {
     case cameraSwitchNotSupported
     case backendFailure(message: String)
     case captureTimedOut
+    case rawCaptureNotSupported
 
     public var errorDescription: String? {
         switch self {
@@ -45,6 +51,8 @@ public enum CaptureSessionError: Error, Equatable, LocalizedError {
             return message
         case .captureTimedOut:
             return "Camera capture timed out."
+        case .rawCaptureNotSupported:
+            return "RAW capture is not supported for the current camera configuration."
         }
     }
 }
@@ -59,6 +67,7 @@ public protocol CaptureSessionBackend {
     func stopRunning()
     func switchCamera() throws -> CaptureLensPosition
     func capturePhoto() async throws -> Data
+    func capturePhoto(format: CapturePhotoFormat) async throws -> Data
     func rawCaptureCapability() -> RawCaptureCapability
 }
 
@@ -71,8 +80,26 @@ public protocol CaptureSessionServing {
     func stop()
     func switchCamera() throws
     func capturePhoto() async throws -> Data
+    func capturePhoto(format: CapturePhotoFormat) async throws -> Data
     func rawCaptureCapability() -> RawCaptureCapability
     func markInterrupted(reason: String)
+}
+
+public extension CaptureSessionBackend {
+    func capturePhoto(format: CapturePhotoFormat) async throws -> Data {
+        switch format {
+        case .processed:
+            return try await capturePhoto()
+        case .raw:
+            throw CaptureSessionError.rawCaptureNotSupported
+        }
+    }
+}
+
+public extension CaptureSessionServing {
+    func capturePhoto() async throws -> Data {
+        try await capturePhoto(format: .processed)
+    }
 }
 
 public final class CaptureSessionService: CaptureSessionServing {
@@ -184,13 +211,20 @@ public final class CaptureSessionService: CaptureSessionServing {
     }
 
     public func capturePhoto() async throws -> Data {
+        try await capturePhoto(format: .processed)
+    }
+
+    public func capturePhoto(format: CapturePhotoFormat) async throws -> Data {
         do {
-            let data = try await backend.capturePhoto()
+            let data = try await backend.capturePhoto(format: format)
             logger?.log(
                 CaptureEvent(
                     category: .capture,
                     action: "photo_capture_succeeded",
-                    payload: ["bytes": "\(data.count)"]
+                    payload: [
+                        "bytes": "\(data.count)",
+                        "format": format.rawValue,
+                    ]
                 )
             )
             return data
@@ -200,7 +234,10 @@ public final class CaptureSessionService: CaptureSessionServing {
                 CaptureEvent(
                     category: .capture,
                     action: "photo_capture_failed",
-                    payload: ["error": message]
+                    payload: [
+                        "error": message,
+                        "format": format.rawValue,
+                    ]
                 )
             )
             throw error
@@ -315,6 +352,10 @@ public final class AVCaptureSessionBackend: CaptureSessionBackend {
     }
 
     public func capturePhoto() async throws -> Data {
+        try await capturePhoto(format: .processed)
+    }
+
+    public func capturePhoto(format: CapturePhotoFormat) async throws -> Data {
         #if canImport(AVFoundation)
         guard isRunning, session.isRunning else {
             throw CaptureSessionError.backendFailure(message: "Capture session is not running.")
@@ -328,7 +369,13 @@ public final class AVCaptureSessionBackend: CaptureSessionBackend {
                 completionBox.resume(with: result)
             }
             addInFlightCapture(processor, id: captureID)
-            photoOutput.capturePhoto(with: makePhotoSettings(), delegate: processor)
+            do {
+                photoOutput.capturePhoto(with: try makePhotoSettings(for: format), delegate: processor)
+            } catch {
+                removeInFlightCapture(captureID)
+                completionBox.resume(with: .failure(error))
+                return
+            }
 
             Task {
                 try? await Task.sleep(for: .seconds(12))
@@ -412,11 +459,54 @@ public final class AVCaptureSessionBackend: CaptureSessionBackend {
         return AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: avPosition)
     }
 
-    private func makePhotoSettings() -> AVCapturePhotoSettings {
-        if photoOutput.availablePhotoCodecTypes.contains(.jpeg) {
-            return AVCapturePhotoSettings(format: [AVVideoCodecKey: AVVideoCodecType.jpeg])
+    private func makePhotoSettings(for format: CapturePhotoFormat) throws -> AVCapturePhotoSettings {
+        switch format {
+        case .processed:
+            return makeProcessedPhotoSettings()
+        case .raw:
+            return try makeRawPhotoSettings()
         }
-        return AVCapturePhotoSettings()
+    }
+
+    private func makeProcessedPhotoSettings() -> AVCapturePhotoSettings {
+        let settings: AVCapturePhotoSettings
+        if photoOutput.availablePhotoCodecTypes.contains(.jpeg) {
+            settings = AVCapturePhotoSettings(format: [AVVideoCodecKey: AVVideoCodecType.jpeg])
+        } else {
+            settings = AVCapturePhotoSettings()
+        }
+        settings.photoQualityPrioritization = .balanced
+        return settings
+    }
+
+    private func makeRawPhotoSettings() throws -> AVCapturePhotoSettings {
+        #if os(macOS)
+        throw CaptureSessionError.rawCaptureNotSupported
+        #else
+        guard let rawPixelFormatType = photoOutput.availableRawPhotoPixelFormatTypes.first else {
+            throw CaptureSessionError.rawCaptureNotSupported
+        }
+
+        if let connection = photoOutput.connection(with: .video),
+           connection.videoScaleAndCropFactor != 1.0 {
+            throw CaptureSessionError.backendFailure(
+                message: "RAW capture requires zoom factor 1.0. Reset zoom before capturing RAW."
+            )
+        }
+
+        if let activeDeviceInput = session.inputs.compactMap({ $0 as? AVCaptureDeviceInput }).first,
+           activeDeviceInput.device.videoZoomFactor != 1.0 {
+            throw CaptureSessionError.backendFailure(
+                message: "RAW capture requires camera zoom factor 1.0."
+            )
+        }
+
+        let settings = AVCapturePhotoSettings(rawPixelFormatType: rawPixelFormatType)
+        settings.photoQualityPrioritization = .speed
+        settings.flashMode = .off
+        settings.isHighResolutionPhotoEnabled = false
+        return settings
+        #endif
     }
 
     private func addInFlightCapture(_ processor: PhotoCaptureProcessor, id: UUID) {

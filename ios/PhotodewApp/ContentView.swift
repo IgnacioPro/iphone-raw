@@ -86,6 +86,20 @@ struct ContentView: View {
                         .frame(maxWidth: .infinity)
                     }
 
+                    HStack(spacing: 12) {
+                        Button(bootstrap.isRawCaptureEnabled ? "RAW Capture: On" : "RAW Capture: Off") {
+                            bootstrap.toggleRawCaptureMode()
+                        }
+                        .buttonStyle(.bordered)
+                        .tint(bootstrap.isRawCaptureEnabled ? .green : nil)
+                        .disabled(!bootstrap.rawCaptureCapability.isSupported || bootstrap.isCapturingPhoto)
+                        .frame(maxWidth: .infinity)
+                    }
+
+                    Text("Mode: \(bootstrap.isRawCaptureEnabled ? "RAW (DNG)" : "Processed")")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+
                     if let lastCaptureByteCount = bootstrap.lastCaptureByteCount {
                         Text("Last capture: \(formattedByteCount(lastCaptureByteCount))")
                             .font(.footnote)

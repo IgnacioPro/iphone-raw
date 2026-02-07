@@ -8,6 +8,9 @@ import AVFoundation
 #if canImport(Photos)
 import Photos
 #endif
+#if canImport(UniformTypeIdentifiers)
+import UniformTypeIdentifiers
+#endif
 
 @main
 struct PhotodewIOSApp: SwiftUI.App {
@@ -42,6 +45,7 @@ final class BootstrapViewModel: ObservableObject {
     @Published private(set) var lastCaptureAt: Date?
     @Published private(set) var lastCaptureError: String?
     @Published private(set) var saveToast: SaveToastState?
+    @Published private(set) var isRawCaptureEnabled = false
     @Published private(set) var rawCaptureCapability = RawCaptureCapability(
         isSupported: false,
         availableRawPhotoPixelFormatTypes: [],
@@ -106,9 +110,10 @@ final class BootstrapViewModel: ObservableObject {
 
         do {
             let lensPosition = model.currentLensPosition()
-            let data = try await model.capturePhotoData()
+            let captureFormat: CapturePhotoFormat = isRawCaptureEnabled ? .raw : .processed
+            let data = try await model.capturePhotoData(format: captureFormat)
             setSaveToast(.saving)
-            let saveResult = try await cameraRollSaver.savePhotoData(data)
+            let saveResult = try await cameraRollSaver.savePhotoData(data, format: captureFormat)
             guard activeCaptureID == captureID else { return }
             let capturedAt = Date()
             lastCaptureByteCount = data.count
@@ -118,7 +123,8 @@ final class BootstrapViewModel: ObservableObject {
                 localIdentifier: saveResult.localIdentifier,
                 capturedAt: capturedAt,
                 lensPosition: lensPosition,
-                byteCount: data.count
+                byteCount: data.count,
+                captureFormat: captureFormat
             )
             setSaveToast(.saved)
             scheduleSaveToastDismiss()
@@ -147,6 +153,18 @@ final class BootstrapViewModel: ObservableObject {
         } catch {
             lastCaptureError = String(describing: error)
         }
+    }
+
+    func toggleRawCaptureMode() {
+        guard rawCaptureCapability.isSupported else {
+            isRawCaptureEnabled = false
+            if let reason = rawCaptureCapability.reason {
+                lastCaptureError = reason
+            }
+            return
+        }
+        isRawCaptureEnabled.toggle()
+        lastCaptureError = nil
     }
 
     #if canImport(AVFoundation)
@@ -210,14 +228,18 @@ final class BootstrapViewModel: ObservableObject {
                 availableRawPhotoPixelFormatTypes: [],
                 reason: "RAW capability is unavailable until the camera session is running."
             )
+            isRawCaptureEnabled = false
             return
         }
         rawCaptureCapability = model.rawCaptureCapability()
+        if !rawCaptureCapability.isSupported {
+            isRawCaptureEnabled = false
+        }
     }
 }
 
 protocol CameraRollSaving: Sendable {
-    func savePhotoData(_ data: Data) async throws -> CameraRollSaveResult
+    func savePhotoData(_ data: Data, format: CapturePhotoFormat) async throws -> CameraRollSaveResult
 }
 
 struct CameraRollSaveResult: Sendable, Equatable {
@@ -226,7 +248,7 @@ struct CameraRollSaveResult: Sendable, Equatable {
 
 #if canImport(Photos)
 private struct SystemCameraRollSaver: CameraRollSaving {
-    func savePhotoData(_ data: Data) async throws -> CameraRollSaveResult {
+    func savePhotoData(_ data: Data, format: CapturePhotoFormat) async throws -> CameraRollSaveResult {
         let status = await authorizationStatus()
         switch status {
         case .authorized, .limited:
@@ -243,7 +265,7 @@ private struct SystemCameraRollSaver: CameraRollSaving {
         do {
             try await PHPhotoLibrary.shared().performChanges { [data] in
                 let request = PHAssetCreationRequest.forAsset()
-                request.addResource(with: .photo, data: data, options: nil)
+                request.addResource(with: .photo, data: data, options: makeCreationOptions(format: format))
                 localIdentifier = request.placeholderForCreatedAsset?.localIdentifier
             }
         } catch {
@@ -257,15 +279,51 @@ private struct SystemCameraRollSaver: CameraRollSaving {
         return CameraRollSaveResult(localIdentifier: localIdentifier)
     }
 
+    private func makeCreationOptions(format: CapturePhotoFormat) -> PHAssetResourceCreationOptions {
+        let options = PHAssetResourceCreationOptions()
+        let timestamp = Self.filenameTimestampFormatter.string(from: Date())
+
+        switch format {
+        case .processed:
+            options.originalFilename = "Photodew-\(timestamp).jpg"
+            #if canImport(UniformTypeIdentifiers)
+            if #available(iOS 26, *) {
+                options.contentType = .jpeg
+            } else {
+                options.uniformTypeIdentifier = "public.jpeg"
+            }
+            #endif
+        case .raw:
+            options.originalFilename = "Photodew-\(timestamp).dng"
+            #if canImport(UniformTypeIdentifiers)
+            if #available(iOS 26, *) {
+                options.contentType = .dng
+            } else {
+                options.uniformTypeIdentifier = "com.adobe.raw-image"
+            }
+            #endif
+        }
+
+        return options
+    }
+
     private func authorizationStatus() async -> PHAuthorizationStatus {
         let currentStatus = PHPhotoLibrary.authorizationStatus(for: .addOnly)
         guard currentStatus == .notDetermined else { return currentStatus }
         return await PHPhotoLibrary.requestAuthorization(for: .addOnly)
     }
+
+    private static let filenameTimestampFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyyMMdd-HHmmss"
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = TimeZone(secondsFromGMT: 0)
+        return formatter
+    }()
 }
 #else
 private struct SystemCameraRollSaver: CameraRollSaving {
-    func savePhotoData(_ data: Data) async throws -> CameraRollSaveResult {
+    func savePhotoData(_ data: Data, format: CapturePhotoFormat) async throws -> CameraRollSaveResult {
         throw CameraRollSaveError.unavailable
     }
 }

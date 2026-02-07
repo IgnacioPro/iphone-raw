@@ -289,6 +289,43 @@ struct CaptureSessionServiceTests {
         #expect(!overlay.isCellClipped(column: 0, row: 0))
     }
 
+    @Test("focus peaking threshold and handler forward to backend")
+    func focusPeakingConfigurationForwardsToBackend() {
+        let backend = StubCaptureBackend()
+        let service = CaptureSessionService(backend: backend)
+        let collector = FocusPeakingOverlayCollector()
+        service.setFocusPeakingOverlayHandler { overlay in
+            collector.append(overlay)
+        }
+        service.setFocusPeakingThreshold(0.24)
+
+        let overlay = FocusPeakingOverlay(
+            columnCount: 2,
+            rowCount: 2,
+            peakCells: [1, 0, 1, 1],
+            threshold: 0.24
+        )
+        backend.emitFocusPeakingOverlay(overlay)
+
+        #expect(backend.latestFocusPeakingThreshold == 0.24)
+        #expect(collector.snapshot() == [overlay])
+    }
+
+    @Test("focus peaking overlay reports peaked ratio")
+    func focusPeakingOverlayReportsPeakedRatio() {
+        let overlay = FocusPeakingOverlay(
+            columnCount: 2,
+            rowCount: 2,
+            peakCells: [1, 0, 0, 1],
+            threshold: 0.25
+        )
+
+        #expect(overlay.peakedCellCount == 2)
+        #expect(overlay.peakedRatio == 0.5)
+        #expect(overlay.isCellPeaked(column: 0, row: 0))
+        #expect(!overlay.isCellPeaked(column: 1, row: 0))
+    }
+
     @Test("markInterrupted updates state and emits interruption event")
     func markInterrupted() throws {
         let backend = StubCaptureBackend()
@@ -608,7 +645,9 @@ private final class StubCaptureBackend: CaptureSessionBackend {
     private var whiteBalanceState: WhiteBalanceControlState = .auto
     private var luminanceHistogramHandler: LuminanceHistogramHandler?
     private var zebraClippingOverlayHandler: ZebraClippingOverlayHandler?
+    private var focusPeakingOverlayHandler: FocusPeakingOverlayHandler?
     private(set) var latestZebraClippingThreshold: Double?
+    private(set) var latestFocusPeakingThreshold: Double?
 
     init(
         shouldFailStart: Bool = false,
@@ -789,6 +828,18 @@ private final class StubCaptureBackend: CaptureSessionBackend {
     func emitZebraClippingOverlay(_ overlay: ZebraClippingOverlay) {
         zebraClippingOverlayHandler?(overlay)
     }
+
+    func setFocusPeakingThreshold(_ threshold: Double?) {
+        latestFocusPeakingThreshold = threshold
+    }
+
+    func setFocusPeakingOverlayHandler(_ handler: FocusPeakingOverlayHandler?) {
+        focusPeakingOverlayHandler = handler
+    }
+
+    func emitFocusPeakingOverlay(_ overlay: FocusPeakingOverlay) {
+        focusPeakingOverlayHandler?(overlay)
+    }
 }
 
 private final class HistogramCollector: @unchecked Sendable {
@@ -820,6 +871,24 @@ private final class ZebraOverlayCollector: @unchecked Sendable {
     }
 
     func snapshot() -> [ZebraClippingOverlay] {
+        lock.lock()
+        let values = overlays
+        lock.unlock()
+        return values
+    }
+}
+
+private final class FocusPeakingOverlayCollector: @unchecked Sendable {
+    private let lock = NSLock()
+    private var overlays: [FocusPeakingOverlay] = []
+
+    func append(_ overlay: FocusPeakingOverlay) {
+        lock.lock()
+        overlays.append(overlay)
+        lock.unlock()
+    }
+
+    func snapshot() -> [FocusPeakingOverlay] {
         lock.lock()
         let values = overlays
         lock.unlock()

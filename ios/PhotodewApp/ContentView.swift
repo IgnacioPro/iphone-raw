@@ -28,6 +28,12 @@ struct ContentView: View {
                         .ignoresSafeArea()
                         .allowsHitTesting(false)
                 }
+                if bootstrap.isFocusPeakingEnabled,
+                   let focusPeakingOverlay = bootstrap.focusPeakingOverlay {
+                    FocusPeakingOverlayView(overlay: focusPeakingOverlay)
+                        .ignoresSafeArea()
+                        .allowsHitTesting(false)
+                }
             } else {
                 VStack(spacing: 14) {
                     CaptureStatusView(state: bootstrap.state)
@@ -68,6 +74,13 @@ struct ContentView: View {
                 HStack {
                     CaptureStatusView(state: bootstrap.state)
                     Spacer(minLength: 0)
+                    if let horizonRollDegrees = bootstrap.horizonRollDegrees {
+                        HorizonLevelIndicatorView(
+                            rollDegrees: horizonRollDegrees,
+                            levelToleranceDegrees: BootstrapViewModel.horizonLevelToleranceDegrees
+                        )
+                        .frame(width: 96, height: 48)
+                    }
                     if let luminanceHistogram = bootstrap.luminanceHistogram {
                         LuminanceHistogramOverlayView(histogram: luminanceHistogram)
                             .frame(width: 156, height: 62)
@@ -231,6 +244,55 @@ struct ContentView: View {
                                 .buttonStyle(.bordered)
                                 .frame(maxWidth: .infinity)
                             }
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .disabled(bootstrap.isCapturingPhoto || bootstrap.isRecoveringSession)
+
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text("Focus Peaking")
+                                .font(.footnote.weight(.semibold))
+                                .foregroundStyle(.white)
+
+                            Text(focusPeakingStatusLine)
+                                .font(.footnote)
+                                .foregroundStyle(.secondary)
+
+                            VStack(alignment: .leading, spacing: 4) {
+                                Slider(
+                                    value: $bootstrap.selectedFocusPeakingThreshold,
+                                    in: BootstrapViewModel.focusPeakingThresholdRange,
+                                    step: 0.01
+                                )
+                                Text("Threshold: \(formattedFocusPeakingThreshold(bootstrap.selectedFocusPeakingThreshold))")
+                                    .font(.footnote)
+                                    .foregroundStyle(.secondary)
+                            }
+
+                            HStack(spacing: 10) {
+                                Button(bootstrap.isFocusPeakingEnabled ? "Disable Peaking" : "Enable Peaking") {
+                                    bootstrap.toggleFocusPeakingOverlay()
+                                }
+                                .buttonStyle(.bordered)
+                                .frame(maxWidth: .infinity)
+
+                                Button("Apply Threshold") {
+                                    bootstrap.applyFocusPeakingThresholdSelection()
+                                }
+                                .buttonStyle(.bordered)
+                                .frame(maxWidth: .infinity)
+                            }
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .disabled(bootstrap.isCapturingPhoto || bootstrap.isRecoveringSession)
+
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text("Horizon Level")
+                                .font(.footnote.weight(.semibold))
+                                .foregroundStyle(.white)
+
+                            Text(horizonStatusLine)
+                                .font(.footnote)
+                                .foregroundStyle(.secondary)
                         }
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .disabled(bootstrap.isCapturingPhoto || bootstrap.isRecoveringSession)
@@ -603,6 +665,10 @@ struct ContentView: View {
         "\(Int((value * 100).rounded()))%"
     }
 
+    private func formattedFocusPeakingThreshold(_ value: Double) -> String {
+        "\(Int((value * 100).rounded()))%"
+    }
+
     private var zebraStatusLine: String {
         let stateDescription = bootstrap.isZebraOverlayEnabled ? "Enabled" : "Disabled"
         if let zebraClippingOverlay = bootstrap.zebraClippingOverlay {
@@ -610,6 +676,31 @@ struct ContentView: View {
             return "\(stateDescription) · clipped area \(clippedPercent)%"
         }
         return "\(stateDescription) · threshold \(formattedZebraThreshold(bootstrap.selectedZebraThreshold))"
+    }
+
+    private var focusPeakingStatusLine: String {
+        let stateDescription = bootstrap.isFocusPeakingEnabled ? "Enabled" : "Disabled"
+        if let focusPeakingOverlay = bootstrap.focusPeakingOverlay {
+            let peakedPercent = Int((focusPeakingOverlay.peakedRatio * 100).rounded())
+            return "\(stateDescription) · peaked area \(peakedPercent)%"
+        }
+        return "\(stateDescription) · threshold \(formattedFocusPeakingThreshold(bootstrap.selectedFocusPeakingThreshold))"
+    }
+
+    private var horizonStatusLine: String {
+        if let horizonStatusMessage = bootstrap.horizonStatusMessage {
+            return horizonStatusMessage
+        }
+        guard let horizonRollDegrees = bootstrap.horizonRollDegrees else {
+            return "Waiting for device motion..."
+        }
+        let isLevel = abs(horizonRollDegrees) <= BootstrapViewModel.horizonLevelToleranceDegrees
+        let stateDescription = isLevel ? "Level" : "Tilted"
+        return "\(stateDescription) · roll \(formattedHorizonDegrees(horizonRollDegrees))"
+    }
+
+    private func formattedHorizonDegrees(_ degrees: Double) -> String {
+        String(format: "%+.1f°", degrees)
     }
 
     private var focusModeLine: String {
@@ -653,6 +744,46 @@ struct ContentView: View {
             return "\(bootstrap.selectedPresetSlot.displayName) saved \(savedAt.formatted(date: .abbreviated, time: .shortened))."
         }
         return "\(bootstrap.selectedPresetSlot.displayName) is empty."
+    }
+}
+
+private struct HorizonLevelIndicatorView: View {
+    let rollDegrees: Double
+    let levelToleranceDegrees: Double
+
+    var body: some View {
+        let clampedRollDegrees = min(max(rollDegrees, -45), 45)
+        let isLevel = abs(rollDegrees) <= levelToleranceDegrees
+        let indicatorColor: Color = isLevel ? .green : .yellow
+
+        ZStack {
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .fill(.black.opacity(0.58))
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .stroke(.white.opacity(0.18), lineWidth: 1)
+
+            Capsule()
+                .fill(.white.opacity(0.2))
+                .frame(width: 66, height: 2)
+
+            Capsule()
+                .fill(indicatorColor.opacity(0.92))
+                .frame(width: 66, height: 3)
+                .rotationEffect(.degrees(-clampedRollDegrees))
+
+            Circle()
+                .fill(.white.opacity(0.85))
+                .frame(width: 6, height: 6)
+        }
+        .overlay(alignment: .bottom) {
+            Text(String(format: "%+.1f°", rollDegrees))
+                .font(.caption2.weight(.semibold))
+                .foregroundStyle(indicatorColor.opacity(0.95))
+                .padding(.bottom, 2)
+        }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("Horizon level indicator")
+        .accessibilityValue("\(Int(rollDegrees.rounded())) degrees")
     }
 }
 
@@ -737,6 +868,54 @@ private struct ZebraClippingOverlayView: View {
         }
         .accessibilityElement(children: .ignore)
         .accessibilityLabel("Zebra clipping overlay")
+    }
+}
+
+private struct FocusPeakingOverlayView: View {
+    let overlay: FocusPeakingOverlay
+
+    var body: some View {
+        GeometryReader { geometry in
+            Canvas { context, size in
+                guard overlay.columnCount > 0, overlay.rowCount > 0 else { return }
+                let cellWidth = size.width / CGFloat(overlay.columnCount)
+                let cellHeight = size.height / CGFloat(overlay.rowCount)
+
+                var peakedArea = Path()
+                for row in 0..<overlay.rowCount {
+                    for column in 0..<overlay.columnCount {
+                        guard overlay.isCellPeaked(column: column, row: row) else { continue }
+                        let rect = CGRect(
+                            x: CGFloat(column) * cellWidth,
+                            y: CGFloat(row) * cellHeight,
+                            width: cellWidth,
+                            height: cellHeight
+                        )
+                        peakedArea.addRect(rect)
+                    }
+                }
+                guard !peakedArea.isEmpty else { return }
+                context.fill(peakedArea, with: .color(.green.opacity(0.2)))
+
+                var highlightPath = Path()
+                for row in 0..<overlay.rowCount {
+                    for column in 0..<overlay.columnCount {
+                        guard overlay.isCellPeaked(column: column, row: row) else { continue }
+                        let insetRect = CGRect(
+                            x: CGFloat(column) * cellWidth + 0.5,
+                            y: CGFloat(row) * cellHeight + 0.5,
+                            width: max(cellWidth - 1, 0.5),
+                            height: max(cellHeight - 1, 0.5)
+                        )
+                        highlightPath.addRect(insetRect)
+                    }
+                }
+                context.stroke(highlightPath, with: .color(.green.opacity(0.75)), lineWidth: 1)
+            }
+            .frame(width: geometry.size.width, height: geometry.size.height)
+        }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("Focus peaking overlay")
     }
 }
 

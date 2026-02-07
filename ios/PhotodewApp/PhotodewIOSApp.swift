@@ -5,6 +5,9 @@ import SwiftUI
 #if canImport(AVFoundation)
 import AVFoundation
 #endif
+#if canImport(CoreMotion)
+import CoreMotion
+#endif
 #if canImport(Photos)
 import Photos
 #endif
@@ -59,11 +62,16 @@ final class BootstrapViewModel: ObservableObject {
     @Published private(set) var whiteBalanceState: WhiteBalanceControlState = .auto
     @Published private(set) var luminanceHistogram: LuminanceHistogram?
     @Published private(set) var zebraClippingOverlay: ZebraClippingOverlay?
+    @Published private(set) var focusPeakingOverlay: FocusPeakingOverlay?
+    @Published private(set) var horizonRollDegrees: Double?
+    @Published private(set) var horizonStatusMessage: String?
     @Published private(set) var isZebraOverlayEnabled = false
+    @Published private(set) var isFocusPeakingEnabled = false
     @Published var selectedExposureISO: Double = 100
     @Published var selectedExposureShutterSeconds: Double = 1.0 / 125.0
     @Published var selectedExposureCompensation: Double = 0
     @Published var selectedZebraThreshold: Double = 0.95
+    @Published var selectedFocusPeakingThreshold: Double = 0.24
     @Published var selectedFocusLensPosition: Double = 0.5
     @Published var selectedWhiteBalanceTemperatureKelvin: Double = 5_000
     @Published var selectedWhiteBalanceTint: Double = 0
@@ -84,6 +92,12 @@ final class BootstrapViewModel: ObservableObject {
     private var dismissSaveToastTask: Task<Void, Never>?
     private var lastHistogramPublishedAt: Date?
     private var lastZebraOverlayPublishedAt: Date?
+    private var lastFocusPeakingOverlayPublishedAt: Date?
+    private var lastHorizonLevelPublishedAt: Date?
+    #if canImport(CoreMotion)
+    private let motionManager = CMMotionManager()
+    private let motionUpdatesQueue = OperationQueue()
+    #endif
     #if canImport(AVFoundation)
     private var sessionNotificationObservers: [NSObjectProtocol] = []
     private weak var observedCaptureSession: AVCaptureSession?
@@ -91,7 +105,12 @@ final class BootstrapViewModel: ObservableObject {
     private static let lowStorageThresholdBytes: Int64 = 5_000_000_000
     private static let minimumHistogramUpdateIntervalSeconds: TimeInterval = 1.0 / 12.0
     private static let minimumZebraOverlayUpdateIntervalSeconds: TimeInterval = 1.0 / 12.0
+    private static let minimumFocusPeakingOverlayUpdateIntervalSeconds: TimeInterval = 1.0 / 12.0
+    private static let minimumHorizonLevelUpdateIntervalSeconds: TimeInterval = 1.0 / 30.0
+    private static let horizonLevelSmoothingFactor: Double = 0.35
+    static let horizonLevelToleranceDegrees: Double = 1.4
     static let zebraThresholdRange: ClosedRange<Double> = 0.85...0.99
+    static let focusPeakingThresholdRange: ClosedRange<Double> = 0.12...0.4
     static let manualISOOptions: [Double] = [25, 50, 64, 80, 100, 125, 160, 200, 320, 400, 640, 800, 1_250]
     static let manualShutterOptions: [Double] = [
         1.0 / 1_000.0,
@@ -116,6 +135,11 @@ final class BootstrapViewModel: ObservableObject {
         self.model = model
         self.cameraRollSaver = cameraRollSaver
         self.storageMonitor = storageMonitor
+        #if canImport(CoreMotion)
+        motionUpdatesQueue.name = "Photodew.HorizonLevelMotionUpdates"
+        motionUpdatesQueue.maxConcurrentOperationCount = 1
+        motionUpdatesQueue.qualityOfService = .userInteractive
+        #endif
     }
 
     func start() async {
@@ -132,6 +156,8 @@ final class BootstrapViewModel: ObservableObject {
         selectedCaptureFormat = .processed
         resetLuminanceHistogramUpdates()
         resetZebraOverlayUpdates()
+        resetFocusPeakingOverlayUpdates()
+        resetHorizonLevelUpdates()
         return
         #else
         await model.bootstrap()
@@ -146,7 +172,8 @@ final class BootstrapViewModel: ObservableObject {
         configureSessionObserversIfNeeded()
         configureLuminanceHistogramUpdatesIfNeeded()
         configureZebraOverlayUpdatesIfNeeded()
-        configureZebraOverlayUpdatesIfNeeded()
+        configureFocusPeakingOverlayUpdatesIfNeeded()
+        configureHorizonLevelUpdatesIfNeeded()
         #endif
     }
 
@@ -174,6 +201,8 @@ final class BootstrapViewModel: ObservableObject {
         storagePressureWarning = nil
         resetLuminanceHistogramUpdates()
         resetZebraOverlayUpdates()
+        resetFocusPeakingOverlayUpdates()
+        resetHorizonLevelUpdates()
         removeSessionObservers()
     }
 
@@ -190,6 +219,8 @@ final class BootstrapViewModel: ObservableObject {
         configureSessionObserversIfNeeded()
         configureLuminanceHistogramUpdatesIfNeeded()
         configureZebraOverlayUpdatesIfNeeded()
+        configureFocusPeakingOverlayUpdatesIfNeeded()
+        configureHorizonLevelUpdatesIfNeeded()
     }
 
     func capturePhoto() async {
@@ -382,6 +413,26 @@ final class BootstrapViewModel: ObservableObject {
         }
     }
 
+    func toggleFocusPeakingOverlay() {
+        guard case .ready = state else { return }
+        isFocusPeakingEnabled.toggle()
+        if isFocusPeakingEnabled {
+            model.setFocusPeakingThreshold(clampedFocusPeakingThreshold(selectedFocusPeakingThreshold))
+        } else {
+            model.setFocusPeakingThreshold(nil)
+            focusPeakingOverlay = nil
+            lastFocusPeakingOverlayPublishedAt = nil
+        }
+    }
+
+    func applyFocusPeakingThresholdSelection() {
+        guard case .ready = state else { return }
+        selectedFocusPeakingThreshold = clampedFocusPeakingThreshold(selectedFocusPeakingThreshold)
+        if isFocusPeakingEnabled {
+            model.setFocusPeakingThreshold(selectedFocusPeakingThreshold)
+        }
+    }
+
     func applyFocusAuto() {
         guard case .ready = state else { return }
         do {
@@ -495,6 +546,9 @@ final class BootstrapViewModel: ObservableObject {
         refreshPresetState()
         configureSessionObserversIfNeeded()
         configureLuminanceHistogramUpdatesIfNeeded()
+        configureZebraOverlayUpdatesIfNeeded()
+        configureFocusPeakingOverlayUpdatesIfNeeded()
+        configureHorizonLevelUpdatesIfNeeded()
 
         if case .ready = state {
             if trigger == "manual_retry" || trigger == "session_runtime_error" || trigger == "session_interruption_ended" {
@@ -790,6 +844,144 @@ final class BootstrapViewModel: ObservableObject {
     private func clampedZebraThreshold(_ value: Double) -> Double {
         min(max(value, Self.zebraThresholdRange.lowerBound), Self.zebraThresholdRange.upperBound)
     }
+
+    private func configureFocusPeakingOverlayUpdatesIfNeeded() {
+        guard case .ready = state else {
+            resetFocusPeakingOverlayUpdates()
+            return
+        }
+        model.setFocusPeakingOverlayHandler { [weak self] overlay in
+            guard let self else { return }
+            Task { @MainActor in
+                self.applyFocusPeakingOverlay(overlay)
+            }
+        }
+        if isFocusPeakingEnabled {
+            model.setFocusPeakingThreshold(clampedFocusPeakingThreshold(selectedFocusPeakingThreshold))
+        } else {
+            model.setFocusPeakingThreshold(nil)
+        }
+    }
+
+    private func resetFocusPeakingOverlayUpdates() {
+        model.setFocusPeakingThreshold(nil)
+        model.setFocusPeakingOverlayHandler(nil)
+        focusPeakingOverlay = nil
+        lastFocusPeakingOverlayPublishedAt = nil
+    }
+
+    private func applyFocusPeakingOverlay(_ overlay: FocusPeakingOverlay) {
+        guard isFocusPeakingEnabled else { return }
+        let now = Date()
+        if let lastFocusPeakingOverlayPublishedAt,
+           now.timeIntervalSince(lastFocusPeakingOverlayPublishedAt) < Self.minimumFocusPeakingOverlayUpdateIntervalSeconds {
+            return
+        }
+        lastFocusPeakingOverlayPublishedAt = now
+        focusPeakingOverlay = overlay
+    }
+
+    private func clampedFocusPeakingThreshold(_ value: Double) -> Double {
+        min(max(value, Self.focusPeakingThresholdRange.lowerBound), Self.focusPeakingThresholdRange.upperBound)
+    }
+
+    private func configureHorizonLevelUpdatesIfNeeded() {
+        guard case .ready = state else {
+            resetHorizonLevelUpdates()
+            return
+        }
+        #if canImport(CoreMotion)
+        guard motionManager.isDeviceMotionAvailable else {
+            horizonStatusMessage = "Horizon level unavailable on this device."
+            horizonRollDegrees = nil
+            return
+        }
+        if motionManager.isDeviceMotionActive {
+            return
+        }
+        horizonStatusMessage = nil
+        motionManager.deviceMotionUpdateInterval = Self.minimumHorizonLevelUpdateIntervalSeconds
+        let referenceFrame = preferredAttitudeReferenceFrame()
+        motionManager.startDeviceMotionUpdates(
+            using: referenceFrame,
+            to: motionUpdatesQueue
+        ) { [weak self] motion, error in
+            guard let self else { return }
+            if let error {
+                Task { @MainActor [weak self] in
+                    self?.horizonStatusMessage = "Horizon updates failed: \(error.localizedDescription)"
+                }
+                return
+            }
+            guard let rollRadians = motion?.attitude.roll else { return }
+            Task { @MainActor [weak self] in
+                self?.applyHorizonRoll(radians: rollRadians)
+            }
+        }
+        #else
+        horizonStatusMessage = "Horizon level requires Core Motion support."
+        horizonRollDegrees = nil
+        #endif
+    }
+
+    private func resetHorizonLevelUpdates() {
+        #if canImport(CoreMotion)
+        if motionManager.isDeviceMotionActive {
+            motionManager.stopDeviceMotionUpdates()
+        }
+        #endif
+        horizonStatusMessage = nil
+        horizonRollDegrees = nil
+        lastHorizonLevelPublishedAt = nil
+    }
+
+    private func applyHorizonRoll(radians: Double) {
+        let now = Date()
+        if let lastHorizonLevelPublishedAt,
+           now.timeIntervalSince(lastHorizonLevelPublishedAt) < Self.minimumHorizonLevelUpdateIntervalSeconds {
+            return
+        }
+        let normalizedRollDegrees = normalizedHorizonRollDegrees(from: radians)
+        if let existingRollDegrees = horizonRollDegrees {
+            horizonRollDegrees = existingRollDegrees + ((normalizedRollDegrees - existingRollDegrees) * Self.horizonLevelSmoothingFactor)
+        } else {
+            horizonRollDegrees = normalizedRollDegrees
+        }
+        horizonStatusMessage = nil
+        lastHorizonLevelPublishedAt = now
+    }
+
+    private func normalizedHorizonRollDegrees(from radians: Double) -> Double {
+        var degrees = radians * 180.0 / .pi
+        while degrees > 180 {
+            degrees -= 360
+        }
+        while degrees < -180 {
+            degrees += 360
+        }
+        if degrees > 90 {
+            degrees -= 180
+        } else if degrees < -90 {
+            degrees += 180
+        }
+        return degrees
+    }
+
+    #if canImport(CoreMotion)
+    private func preferredAttitudeReferenceFrame() -> CMAttitudeReferenceFrame {
+        let availableFrames = CMMotionManager.availableAttitudeReferenceFrames()
+        if availableFrames.contains(.xArbitraryCorrectedZVertical) {
+            return .xArbitraryCorrectedZVertical
+        }
+        if availableFrames.contains(.xArbitraryZVertical) {
+            return .xArbitraryZVertical
+        }
+        if availableFrames.contains(.xMagneticNorthZVertical) {
+            return .xMagneticNorthZVertical
+        }
+        return .xTrueNorthZVertical
+    }
+    #endif
 
     #if canImport(AVFoundation)
     private func configureSessionObserversIfNeeded() {

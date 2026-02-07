@@ -143,6 +143,14 @@ public final class CaptureAppModel {
         sessionService.setZebraClippingOverlayHandler(handler)
     }
 
+    public func setFocusPeakingThreshold(_ threshold: Double?) {
+        sessionService.setFocusPeakingThreshold(threshold)
+    }
+
+    public func setFocusPeakingOverlayHandler(_ handler: FocusPeakingOverlayHandler?) {
+        sessionService.setFocusPeakingOverlayHandler(handler)
+    }
+
     public func exposureState() -> ExposureControlState {
         sessionService.exposureState
     }

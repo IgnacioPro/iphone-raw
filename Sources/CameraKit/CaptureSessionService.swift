@@ -164,6 +164,8 @@ public protocol CaptureSessionBackend {
     func setLuminanceHistogramHandler(_ handler: LuminanceHistogramHandler?)
     func setZebraClippingThreshold(_ threshold: Double?)
     func setZebraClippingOverlayHandler(_ handler: ZebraClippingOverlayHandler?)
+    func setFocusPeakingThreshold(_ threshold: Double?)
+    func setFocusPeakingOverlayHandler(_ handler: FocusPeakingOverlayHandler?)
 }
 
 public protocol CaptureSessionServing {
@@ -196,6 +198,8 @@ public protocol CaptureSessionServing {
     func setLuminanceHistogramHandler(_ handler: LuminanceHistogramHandler?)
     func setZebraClippingThreshold(_ threshold: Double?)
     func setZebraClippingOverlayHandler(_ handler: ZebraClippingOverlayHandler?)
+    func setFocusPeakingThreshold(_ threshold: Double?)
+    func setFocusPeakingOverlayHandler(_ handler: FocusPeakingOverlayHandler?)
 }
 
 public extension CaptureSessionBackend {
@@ -247,6 +251,10 @@ public extension CaptureSessionBackend {
     func setZebraClippingThreshold(_ threshold: Double?) {}
 
     func setZebraClippingOverlayHandler(_ handler: ZebraClippingOverlayHandler?) {}
+
+    func setFocusPeakingThreshold(_ threshold: Double?) {}
+
+    func setFocusPeakingOverlayHandler(_ handler: FocusPeakingOverlayHandler?) {}
 }
 
 public extension CaptureSessionServing {
@@ -566,6 +574,14 @@ public final class CaptureSessionService: CaptureSessionServing {
         backend.setZebraClippingOverlayHandler(handler)
     }
 
+    public func setFocusPeakingThreshold(_ threshold: Double?) {
+        backend.setFocusPeakingThreshold(threshold)
+    }
+
+    public func setFocusPeakingOverlayHandler(_ handler: FocusPeakingOverlayHandler?) {
+        backend.setFocusPeakingOverlayHandler(handler)
+    }
+
     private static func captureLatencyMilliseconds(from start: Date, to end: Date) -> Int {
         max(Int((end.timeIntervalSince(start) * 1_000).rounded()), 0)
     }
@@ -841,6 +857,10 @@ public final class AVCaptureSessionBackend: NSObject, CaptureSessionBackend {
     private var zebraThresholdLuma: UInt8?
     private var zebraThresholdNormalized: Double = 0.95
     private var zebraOverlayHandler: ZebraClippingOverlayHandler?
+    private let focusPeakingOverlayLock = NSLock()
+    private var focusPeakingThresholdMagnitude: UInt16?
+    private var focusPeakingThresholdNormalized: Double = 0.24
+    private var focusPeakingOverlayHandler: FocusPeakingOverlayHandler?
     #endif
 
     public private(set) var isRunning = false
@@ -1163,6 +1183,29 @@ public final class AVCaptureSessionBackend: NSObject, CaptureSessionBackend {
         #endif
     }
 
+    public func setFocusPeakingThreshold(_ threshold: Double?) {
+        #if canImport(AVFoundation)
+        focusPeakingOverlayLock.withLock {
+            guard let threshold else {
+                focusPeakingThresholdMagnitude = nil
+                return
+            }
+            let clampedThreshold = min(max(threshold, 0), 1)
+            focusPeakingThresholdNormalized = clampedThreshold
+            let maxMagnitude = Double(FocusPeakingOverlayAnalyzer.maxGradientMagnitude)
+            focusPeakingThresholdMagnitude = UInt16((clampedThreshold * maxMagnitude).rounded())
+        }
+        #endif
+    }
+
+    public func setFocusPeakingOverlayHandler(_ handler: FocusPeakingOverlayHandler?) {
+        #if canImport(AVFoundation)
+        focusPeakingOverlayLock.withLock {
+            focusPeakingOverlayHandler = handler
+        }
+        #endif
+    }
+
     public func applyFocusState(_ state: FocusControlState) throws -> FocusControlState {
         #if canImport(AVFoundation)
         try configureSessionIfNeeded(for: activeLensPosition)
@@ -1407,6 +1450,29 @@ public final class AVCaptureSessionBackend: NSObject, CaptureSessionBackend {
             return
         }
         zebraHandler(overlay)
+    }
+
+    private func dispatchFocusPeakingOverlayIfNeeded(from sampleBuffer: CMSampleBuffer) {
+        let peakingConfiguration = focusPeakingOverlayLock.withLock {
+            (
+                handler: focusPeakingOverlayHandler,
+                thresholdMagnitude: focusPeakingThresholdMagnitude,
+                threshold: focusPeakingThresholdNormalized
+            )
+        }
+        guard let peakingHandler = peakingConfiguration.handler,
+              let thresholdMagnitude = peakingConfiguration.thresholdMagnitude else {
+            return
+        }
+        guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer),
+              let overlay = FocusPeakingOverlayAnalyzer.overlay(
+                  from: pixelBuffer,
+                  thresholdMagnitude: thresholdMagnitude,
+                  threshold: peakingConfiguration.threshold
+              ) else {
+            return
+        }
+        peakingHandler(overlay)
     }
 
     private func cameraDevice(for position: CaptureLensPosition) -> AVCaptureDevice? {
@@ -1673,6 +1739,7 @@ extension AVCaptureSessionBackend: AVCaptureVideoDataOutputSampleBufferDelegate 
         guard output === videoDataOutput else { return }
         dispatchHistogramIfNeeded(from: sampleBuffer)
         dispatchZebraOverlayIfNeeded(from: sampleBuffer)
+        dispatchFocusPeakingOverlayIfNeeded(from: sampleBuffer)
     }
 }
 
@@ -1895,6 +1962,161 @@ private enum ZebraClippingOverlayAnalyzer {
                 }
             }
         }
+    }
+
+    private static func gridCellIndex(x: Int, y: Int, width: Int, height: Int) -> Int {
+        guard width > 0, height > 0 else { return 0 }
+        let column = min((x * columnCount) / width, columnCount - 1)
+        let row = min((y * rowCount) / height, rowCount - 1)
+        return row * columnCount + column
+    }
+}
+
+private enum FocusPeakingOverlayAnalyzer {
+    static let sampleStride = 4
+    static let minimumPeakedSampleRatio = 0.18
+    static let maxGradientMagnitude: UInt16 = 510
+    static let columnCount = FocusPeakingOverlay.defaultColumnCount
+    static let rowCount = FocusPeakingOverlay.defaultRowCount
+
+    static func overlay(
+        from pixelBuffer: CVPixelBuffer,
+        thresholdMagnitude: UInt16,
+        threshold: Double
+    ) -> FocusPeakingOverlay? {
+        CVPixelBufferLockBaseAddress(pixelBuffer, .readOnly)
+        defer { CVPixelBufferUnlockBaseAddress(pixelBuffer, .readOnly) }
+
+        let cellCount = columnCount * rowCount
+        var peakedSampleCounts = Array(repeating: UInt32(0), count: cellCount)
+        var totalSampleCounts = Array(repeating: UInt32(0), count: cellCount)
+
+        let planeCount = CVPixelBufferGetPlaneCount(pixelBuffer)
+        if planeCount > 0 {
+            guard let baseAddress = CVPixelBufferGetBaseAddressOfPlane(pixelBuffer, 0) else {
+                return nil
+            }
+            let width = CVPixelBufferGetWidthOfPlane(pixelBuffer, 0)
+            let height = CVPixelBufferGetHeightOfPlane(pixelBuffer, 0)
+            let bytesPerRow = CVPixelBufferGetBytesPerRowOfPlane(pixelBuffer, 0)
+            accumulatePeakingSamples(
+                fromPlanarLumaBaseAddress: baseAddress,
+                width: width,
+                height: height,
+                bytesPerRow: bytesPerRow,
+                thresholdMagnitude: thresholdMagnitude,
+                peakedSampleCounts: &peakedSampleCounts,
+                totalSampleCounts: &totalSampleCounts
+            )
+        } else {
+            guard CVPixelBufferGetPixelFormatType(pixelBuffer) == kCVPixelFormatType_32BGRA,
+                  let baseAddress = CVPixelBufferGetBaseAddress(pixelBuffer) else {
+                return nil
+            }
+            let width = CVPixelBufferGetWidth(pixelBuffer)
+            let height = CVPixelBufferGetHeight(pixelBuffer)
+            let bytesPerRow = CVPixelBufferGetBytesPerRow(pixelBuffer)
+            accumulatePeakingSamples(
+                fromBGRABaseAddress: baseAddress,
+                width: width,
+                height: height,
+                bytesPerRow: bytesPerRow,
+                thresholdMagnitude: thresholdMagnitude,
+                peakedSampleCounts: &peakedSampleCounts,
+                totalSampleCounts: &totalSampleCounts
+            )
+        }
+
+        var peakCells = Array(repeating: UInt8(0), count: cellCount)
+        for index in 0..<cellCount {
+            let totalSamples = totalSampleCounts[index]
+            guard totalSamples > 0 else { continue }
+            let peakedSamples = peakedSampleCounts[index]
+            if Double(peakedSamples) / Double(totalSamples) >= minimumPeakedSampleRatio {
+                peakCells[index] = 1
+            }
+        }
+
+        return FocusPeakingOverlay(
+            columnCount: columnCount,
+            rowCount: rowCount,
+            peakCells: peakCells,
+            threshold: threshold,
+            generatedAt: Date()
+        )
+    }
+
+    private static func accumulatePeakingSamples(
+        fromPlanarLumaBaseAddress baseAddress: UnsafeMutableRawPointer,
+        width: Int,
+        height: Int,
+        bytesPerRow: Int,
+        thresholdMagnitude: UInt16,
+        peakedSampleCounts: inout [UInt32],
+        totalSampleCounts: inout [UInt32]
+    ) {
+        guard width > 1, height > 1 else { return }
+        let lumaBuffer = baseAddress.assumingMemoryBound(to: UInt8.self)
+        for y in stride(from: 0, to: height - 1, by: sampleStride) {
+            let rowPointer = lumaBuffer.advanced(by: y * bytesPerRow)
+            let nextRowPointer = lumaBuffer.advanced(by: (y + 1) * bytesPerRow)
+            for x in stride(from: 0, to: width - 1, by: sampleStride) {
+                let centerLuma = Int(rowPointer[x])
+                let rightLuma = Int(rowPointer[x + 1])
+                let downLuma = Int(nextRowPointer[x])
+                let gradientMagnitude = UInt16(abs(rightLuma - centerLuma) + abs(downLuma - centerLuma))
+                let cellIndex = gridCellIndex(x: x, y: y, width: width, height: height)
+                totalSampleCounts[cellIndex] += 1
+                if gradientMagnitude >= thresholdMagnitude {
+                    peakedSampleCounts[cellIndex] += 1
+                }
+            }
+        }
+    }
+
+    private static func accumulatePeakingSamples(
+        fromBGRABaseAddress baseAddress: UnsafeMutableRawPointer,
+        width: Int,
+        height: Int,
+        bytesPerRow: Int,
+        thresholdMagnitude: UInt16,
+        peakedSampleCounts: inout [UInt32],
+        totalSampleCounts: inout [UInt32]
+    ) {
+        guard width > 1, height > 1 else { return }
+        let bgraBuffer = baseAddress.assumingMemoryBound(to: UInt8.self)
+        for y in stride(from: 0, to: height - 1, by: sampleStride) {
+            let rowPointer = bgraBuffer.advanced(by: y * bytesPerRow)
+            let nextRowPointer = bgraBuffer.advanced(by: (y + 1) * bytesPerRow)
+            for x in stride(from: 0, to: width - 1, by: sampleStride) {
+                let pixelOffset = x * 4
+                let centerLuma = luminance(
+                    red: Int(rowPointer[pixelOffset + 2]),
+                    green: Int(rowPointer[pixelOffset + 1]),
+                    blue: Int(rowPointer[pixelOffset])
+                )
+                let rightLuma = luminance(
+                    red: Int(rowPointer[pixelOffset + 6]),
+                    green: Int(rowPointer[pixelOffset + 5]),
+                    blue: Int(rowPointer[pixelOffset + 4])
+                )
+                let downLuma = luminance(
+                    red: Int(nextRowPointer[pixelOffset + 2]),
+                    green: Int(nextRowPointer[pixelOffset + 1]),
+                    blue: Int(nextRowPointer[pixelOffset])
+                )
+                let gradientMagnitude = UInt16(abs(rightLuma - centerLuma) + abs(downLuma - centerLuma))
+                let cellIndex = gridCellIndex(x: x, y: y, width: width, height: height)
+                totalSampleCounts[cellIndex] += 1
+                if gradientMagnitude >= thresholdMagnitude {
+                    peakedSampleCounts[cellIndex] += 1
+                }
+            }
+        }
+    }
+
+    private static func luminance(red: Int, green: Int, blue: Int) -> Int {
+        (54 * red + 183 * green + 19 * blue) >> 8
     }
 
     private static func gridCellIndex(x: Int, y: Int, width: Int, height: Int) -> Int {

@@ -1,0 +1,4 @@
+interface:
+  display_name: "iOS Frontend Expert"
+  short_description: "Build polished SwiftUI/UIKit iOS UI with production rigor"
+  default_prompt: "Design and implement production-grade iOS frontend features with strong UX, accessibility, and performance."

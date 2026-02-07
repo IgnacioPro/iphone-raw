@@ -13,7 +13,8 @@ Planning horizon: 2026-02-09 through 2026-06-05
 | M1 Camera MVP | Complete | `CAM-001` through `CAM-006` are implemented; interruption recovery and retry UX were validated on device. |
 | M2 Manual Controls | Complete | `MAN-001` through `MAN-006` are implemented in code and accepted on device. |
 | M3 True RAW | Complete (ahead of schedule) | `RAW-001` to `RAW-008` are implemented and accepted on device. |
-| M4 to M7 | Not started | No changes yet in Pro UX, render pipeline, and release workstreams. |
+| M4 Pro Capture UX | In progress | `UX-001` to `UX-004` are implemented in code; on-device validation remains for `UX-004`. |
+| M5 to M7 | Not started | Render pipeline, QA hardening, and release workstreams are still untouched. |
 
 ### Ticket Status (Implemented / In Progress / Next)
 
@@ -44,11 +45,15 @@ Planning horizon: 2026-02-09 through 2026-06-05
 | RAW-005 | Done (accepted) | Metadata pack extraction/persistence is implemented and user-confirmed working on device; implementation in `/Users/ignacio/Code/photodew/Sources/CameraKit/CaptureTechnicalMetadata.swift`, `/Users/ignacio/Code/photodew/Sources/CameraKit/CaptureSessionService.swift`, `/Users/ignacio/Code/photodew/Sources/App/CaptureAppModel.swift`, with tests in `/Users/ignacio/Code/photodew/Tests/AppTests/CaptureAppModelTests.swift`. | None |
 | RAW-006 | Done (accepted) | Storage warning + cleanup UX is implemented and user-confirmed working on device; implementation in `/Users/ignacio/Code/photodew/ios/PhotodewApp/PhotodewIOSApp.swift`, `/Users/ignacio/Code/photodew/ios/PhotodewApp/ContentView.swift`, and `/Users/ignacio/Code/photodew/Sources/Storage/CaptureMetadataStore.swift`. | None |
 | RAW-008 | Done (accepted) | Explicit in-app mode education copy in `/Users/ignacio/Code/photodew/ios/PhotodewApp/ContentView.swift` explains True RAW vs Apple ProRAW vs processed tradeoffs; user validated on device. | None |
+| UX-001 | Done | Real-time luminance histogram model/analyzer and UI overlay are implemented in `/Users/ignacio/Code/photodew/Sources/CameraKit/LuminanceHistogram.swift`, `/Users/ignacio/Code/photodew/Sources/CameraKit/CaptureSessionService.swift`, and `/Users/ignacio/Code/photodew/ios/PhotodewApp/ContentView.swift`; forwarding and model behavior are covered in `/Users/ignacio/Code/photodew/Tests/CameraKitTests/CaptureSessionServiceTests.swift`. | None |
+| UX-002 | Done | Zebra clipping thresholding, overlay analyzer, and UI controls are implemented in `/Users/ignacio/Code/photodew/Sources/CameraKit/ZebraClippingOverlay.swift`, `/Users/ignacio/Code/photodew/Sources/CameraKit/CaptureSessionService.swift`, and `/Users/ignacio/Code/photodew/ios/PhotodewApp/ContentView.swift`; coverage is in `/Users/ignacio/Code/photodew/Tests/CameraKitTests/CaptureSessionServiceTests.swift`. | None |
+| UX-003 | Done (accepted) | Focus peaking overlay model/analyzer and thresholded UI controls are implemented in `/Users/ignacio/Code/photodew/Sources/CameraKit/FocusPeakingOverlay.swift`, `/Users/ignacio/Code/photodew/Sources/CameraKit/CaptureSessionService.swift`, `/Users/ignacio/Code/photodew/Sources/App/CaptureAppModel.swift`, `/Users/ignacio/Code/photodew/ios/PhotodewApp/PhotodewIOSApp.swift`, and `/Users/ignacio/Code/photodew/ios/PhotodewApp/ContentView.swift`; coverage is in `/Users/ignacio/Code/photodew/Tests/CameraKitTests/CaptureSessionServiceTests.swift`; user validated on device. | None |
+| UX-004 | In progress (code complete) | Horizon level indicator driven by Core Motion device-motion roll is implemented in `/Users/ignacio/Code/photodew/ios/PhotodewApp/PhotodewIOSApp.swift` and `/Users/ignacio/Code/photodew/ios/PhotodewApp/ContentView.swift`, using Apple-recommended `CMMotionManager` update/stop lifecycle and reference-frame selection behavior. | Run `/Users/ignacio/Code/photodew/docs/validation/ux-004-horizon-level-validation.md` on a physical device and accept/reject. |
 
 ### Immediate Next Sequence
 
-1. Start `UX-001` realtime luminance histogram implementation slice.
-2. Draft a compact `UX-001` on-device validation checklist before coding overlays.
+1. Execute `/Users/ignacio/Code/photodew/docs/validation/ux-004-horizon-level-validation.md` on a physical iPhone and record pass/fail notes.
+2. Start `UX-005` quick toggles and gesture model after `UX-004` acceptance.
 
 ### Known Device Console Noise
 

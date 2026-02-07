@@ -20,6 +20,20 @@ struct PhotodewIOSApp: SwiftUI.App {
     }
 }
 
+enum SaveToastState: Equatable {
+    case saving
+    case saved
+
+    var message: String {
+        switch self {
+        case .saving:
+            return "Saving to Photos..."
+        case .saved:
+            return "Saved to Photos."
+        }
+    }
+}
+
 @MainActor
 final class BootstrapViewModel: ObservableObject {
     @Published private(set) var state: AppBootState = .idle
@@ -27,11 +41,17 @@ final class BootstrapViewModel: ObservableObject {
     @Published private(set) var lastCaptureByteCount: Int?
     @Published private(set) var lastCaptureAt: Date?
     @Published private(set) var lastCaptureError: String?
-    @Published private(set) var lastSaveStatusMessage: String?
+    @Published private(set) var saveToast: SaveToastState?
+    @Published private(set) var rawCaptureCapability = RawCaptureCapability(
+        isSupported: false,
+        availableRawPhotoPixelFormatTypes: [],
+        reason: "RAW capability is unavailable until the camera session is running."
+    )
 
     private let model: CaptureAppModel
     private let cameraRollSaver: CameraRollSaving
     private var activeCaptureID: UUID?
+    private var dismissSaveToastTask: Task<Void, Never>?
 
     init(
         model: CaptureAppModel = AppCompositionRoot().makeAppModel(),
@@ -44,20 +64,32 @@ final class BootstrapViewModel: ObservableObject {
     func start() async {
         #if targetEnvironment(simulator)
         state = .blocked(reason: "Simulator has no real camera input. Use a physical iPhone for camera testing.")
+        rawCaptureCapability = RawCaptureCapability(
+            isSupported: false,
+            availableRawPhotoPixelFormatTypes: [],
+            reason: "RAW capability checks require a physical iPhone camera."
+        )
         return
         #else
         await model.bootstrap()
         state = model.bootState
+        refreshRawCaptureCapability()
         #endif
     }
 
     func stop() {
         model.stopSession()
+        rawCaptureCapability = RawCaptureCapability(
+            isSupported: false,
+            availableRawPhotoPixelFormatTypes: [],
+            reason: "RAW capability is unavailable until the camera session is running."
+        )
     }
 
     func resumeSessionIfNeeded() {
         model.resumeSessionIfNeeded()
         state = model.bootState
+        refreshRawCaptureCapability()
     }
 
     func capturePhoto() async {
@@ -68,18 +100,28 @@ final class BootstrapViewModel: ObservableObject {
         activeCaptureID = captureID
         isCapturingPhoto = true
         lastCaptureError = nil
-        lastSaveStatusMessage = nil
+        setSaveToast(nil)
 
         startCaptureWatchdog(for: captureID)
 
         do {
+            let lensPosition = model.currentLensPosition()
             let data = try await model.capturePhotoData()
-            try await cameraRollSaver.savePhotoData(data)
+            setSaveToast(.saving)
+            let saveResult = try await cameraRollSaver.savePhotoData(data)
             guard activeCaptureID == captureID else { return }
+            let capturedAt = Date()
             lastCaptureByteCount = data.count
-            lastCaptureAt = Date()
+            lastCaptureAt = capturedAt
             lastCaptureError = nil
-            lastSaveStatusMessage = "Saved to Photos."
+            await model.persistPhotoLibraryCapture(
+                localIdentifier: saveResult.localIdentifier,
+                capturedAt: capturedAt,
+                lensPosition: lensPosition,
+                byteCount: data.count
+            )
+            setSaveToast(.saved)
+            scheduleSaveToastDismiss()
             activeCaptureID = nil
             isCapturingPhoto = false
         } catch {
@@ -87,7 +129,7 @@ final class BootstrapViewModel: ObservableObject {
             activeCaptureID = nil
             isCapturingPhoto = false
             lastCaptureError = captureErrorMessage(from: error)
-            lastSaveStatusMessage = nil
+            setSaveToast(nil)
             if error is CaptureSessionError {
                 Task { [weak self] in
                     await self?.recoverSessionAfterCaptureFailure()
@@ -101,6 +143,7 @@ final class BootstrapViewModel: ObservableObject {
         do {
             try model.switchCamera()
             lastCaptureError = nil
+            refreshRawCaptureCapability()
         } catch {
             lastCaptureError = String(describing: error)
         }
@@ -116,6 +159,7 @@ final class BootstrapViewModel: ObservableObject {
         model.stopSession()
         await model.bootstrap()
         state = model.bootState
+        refreshRawCaptureCapability()
     }
 
     private func startCaptureWatchdog(for captureID: UUID) {
@@ -127,6 +171,7 @@ final class BootstrapViewModel: ObservableObject {
             self.activeCaptureID = nil
             self.isCapturingPhoto = false
             self.lastCaptureError = "Capture timed out. Restarting camera session."
+            self.setSaveToast(nil)
             await self.recoverSessionAfterCaptureFailure()
         }
     }
@@ -139,15 +184,49 @@ final class BootstrapViewModel: ObservableObject {
 
         return error.localizedDescription
     }
+
+    private func setSaveToast(_ toast: SaveToastState?) {
+        dismissSaveToastTask?.cancel()
+        dismissSaveToastTask = nil
+        saveToast = toast
+    }
+
+    private func scheduleSaveToastDismiss() {
+        dismissSaveToastTask?.cancel()
+        dismissSaveToastTask = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(1.6))
+            guard !Task.isCancelled else { return }
+            await MainActor.run {
+                self?.saveToast = nil
+                self?.dismissSaveToastTask = nil
+            }
+        }
+    }
+
+    private func refreshRawCaptureCapability() {
+        guard case .ready = state else {
+            rawCaptureCapability = RawCaptureCapability(
+                isSupported: false,
+                availableRawPhotoPixelFormatTypes: [],
+                reason: "RAW capability is unavailable until the camera session is running."
+            )
+            return
+        }
+        rawCaptureCapability = model.rawCaptureCapability()
+    }
 }
 
 protocol CameraRollSaving: Sendable {
-    func savePhotoData(_ data: Data) async throws
+    func savePhotoData(_ data: Data) async throws -> CameraRollSaveResult
+}
+
+struct CameraRollSaveResult: Sendable, Equatable {
+    let localIdentifier: String
 }
 
 #if canImport(Photos)
 private struct SystemCameraRollSaver: CameraRollSaving {
-    func savePhotoData(_ data: Data) async throws {
+    func savePhotoData(_ data: Data) async throws -> CameraRollSaveResult {
         let status = await authorizationStatus()
         switch status {
         case .authorized, .limited:
@@ -160,14 +239,22 @@ private struct SystemCameraRollSaver: CameraRollSaving {
             throw CameraRollSaveError.accessDenied
         }
 
+        var localIdentifier: String?
         do {
             try await PHPhotoLibrary.shared().performChanges { [data] in
                 let request = PHAssetCreationRequest.forAsset()
                 request.addResource(with: .photo, data: data, options: nil)
+                localIdentifier = request.placeholderForCreatedAsset?.localIdentifier
             }
         } catch {
             throw CameraRollSaveError.saveFailed
         }
+
+        guard let localIdentifier else {
+            throw CameraRollSaveError.saveFailed
+        }
+
+        return CameraRollSaveResult(localIdentifier: localIdentifier)
     }
 
     private func authorizationStatus() async -> PHAuthorizationStatus {
@@ -178,7 +265,7 @@ private struct SystemCameraRollSaver: CameraRollSaving {
 }
 #else
 private struct SystemCameraRollSaver: CameraRollSaving {
-    func savePhotoData(_ data: Data) async throws {
+    func savePhotoData(_ data: Data) async throws -> CameraRollSaveResult {
         throw CameraRollSaveError.unavailable
     }
 }

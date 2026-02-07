@@ -84,6 +84,68 @@ struct CaptureAppModelTests {
         #expect(model.bootState == .ready)
         #expect(sessionBackend.isRunning)
     }
+
+    @Test("persistPhotoLibraryCapture stores local identifier timestamp and lens metadata")
+    func persistPhotoLibraryCaptureMetadata() async {
+        let permissionClient = StubPermissionClient(status: .authorized, requestAccessResult: true)
+        let sessionBackend = StubCaptureBackend()
+        let sessionService = CaptureSessionService(backend: sessionBackend)
+        let gate = CameraPermissionGate(client: permissionClient)
+        let metadataStore = InMemoryCaptureMetadataStore()
+        let model = CaptureAppModel(
+            permissionGate: gate,
+            sessionService: sessionService,
+            metadataStore: metadataStore
+        )
+
+        await model.bootstrap()
+        let capturedAt = Date(timeIntervalSince1970: 1_234_567_890)
+        await model.persistPhotoLibraryCapture(
+            localIdentifier: "A1B2-C3D4",
+            capturedAt: capturedAt,
+            lensPosition: .front,
+            byteCount: 4_200
+        )
+
+        let artifacts = await metadataStore.fetchAll()
+        #expect(artifacts.count == 1)
+        guard let artifact = artifacts.first else {
+            Issue.record("Expected one persisted capture artifact.")
+            return
+        }
+
+        #expect(artifact.photoLibraryLocalIdentifier == "A1B2-C3D4")
+        #expect(artifact.primaryURL.absoluteString == "photos://asset")
+        #expect(artifact.createdAt == capturedAt)
+        #expect(artifact.metadata["photo_library_local_identifier"] == "A1B2-C3D4")
+        #expect(artifact.metadata["captured_at"] == capturedAt.ISO8601Format())
+        #expect(artifact.metadata["lens_position"] == "front")
+        #expect(artifact.metadata["byte_count"] == "4200")
+    }
+
+    @Test("rawCaptureCapability exposes service capability state")
+    func rawCaptureCapability() async {
+        let permissionClient = StubPermissionClient(status: .authorized, requestAccessResult: true)
+        let sessionBackend = StubCaptureBackend(
+            rawCapability: RawCaptureCapability(
+                isSupported: true,
+                availableRawPhotoPixelFormatTypes: [875_704_422]
+            )
+        )
+        let sessionService = CaptureSessionService(backend: sessionBackend)
+        let gate = CameraPermissionGate(client: permissionClient)
+        let model = CaptureAppModel(
+            permissionGate: gate,
+            sessionService: sessionService,
+            metadataStore: InMemoryCaptureMetadataStore()
+        )
+
+        await model.bootstrap()
+        let capability = model.rawCaptureCapability()
+
+        #expect(capability.isSupported)
+        #expect(capability.availableRawPhotoPixelFormatTypes == [875_704_422])
+    }
 }
 
 private final class StubPermissionClient: CameraPermissionClient {
@@ -108,9 +170,17 @@ private final class StubCaptureBackend: CaptureSessionBackend {
     private(set) var isRunning: Bool = false
     private(set) var activeLensPosition: CaptureLensPosition = .back
     private let captureData: Data
+    private let rawCapability: RawCaptureCapability
 
-    init(captureData: Data = Data([0xFF, 0xD8, 0xFF, 0xD9])) {
+    init(
+        captureData: Data = Data([0xFF, 0xD8, 0xFF, 0xD9]),
+        rawCapability: RawCaptureCapability = RawCaptureCapability(
+            isSupported: false,
+            availableRawPhotoPixelFormatTypes: []
+        )
+    ) {
         self.captureData = captureData
+        self.rawCapability = rawCapability
     }
 
     #if canImport(AVFoundation)
@@ -134,5 +204,9 @@ private final class StubCaptureBackend: CaptureSessionBackend {
 
     func capturePhoto() async throws -> Data {
         captureData
+    }
+
+    func rawCaptureCapability() -> RawCaptureCapability {
+        rawCapability
     }
 }

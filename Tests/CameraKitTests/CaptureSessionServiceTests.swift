@@ -77,6 +77,18 @@ struct CaptureSessionServiceTests {
 
         #expect(logger.events.contains(where: { $0.action == "photo_capture_failed" }))
     }
+
+    @Test("rawCaptureCapability returns backend reported capability")
+    func rawCaptureCapability() {
+        let expected = RawCaptureCapability(
+            isSupported: true,
+            availableRawPhotoPixelFormatTypes: [875_704_422]
+        )
+        let backend = StubCaptureBackend(rawCapability: expected)
+        let service = CaptureSessionService(backend: backend)
+
+        #expect(service.rawCaptureCapability() == expected)
+    }
 }
 
 private final class StubCaptureBackend: CaptureSessionBackend {
@@ -87,17 +99,23 @@ private final class StubCaptureBackend: CaptureSessionBackend {
     private let shouldFailSwitch: Bool
     private let shouldFailCapture: Bool
     private let captureData: Data
+    private let rawCapability: RawCaptureCapability
 
     init(
         shouldFailStart: Bool = false,
         shouldFailSwitch: Bool = false,
         shouldFailCapture: Bool = false,
-        captureData: Data = Data([0xFF, 0xD8, 0xFF, 0xD9])
+        captureData: Data = Data([0xFF, 0xD8, 0xFF, 0xD9]),
+        rawCapability: RawCaptureCapability = RawCaptureCapability(
+            isSupported: false,
+            availableRawPhotoPixelFormatTypes: []
+        )
     ) {
         self.shouldFailStart = shouldFailStart
         self.shouldFailSwitch = shouldFailSwitch
         self.shouldFailCapture = shouldFailCapture
         self.captureData = captureData
+        self.rawCapability = rawCapability
     }
 
     #if canImport(AVFoundation)
@@ -130,5 +148,9 @@ private final class StubCaptureBackend: CaptureSessionBackend {
             throw CaptureSessionError.backendFailure(message: "capture failed")
         }
         return captureData
+    }
+
+    func rawCaptureCapability() -> RawCaptureCapability {
+        rawCapability
     }
 }

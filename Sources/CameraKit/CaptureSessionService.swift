@@ -16,6 +16,22 @@ public enum CaptureSessionState: Equatable {
     case failed(message: String)
 }
 
+public struct RawCaptureCapability: Equatable, Sendable {
+    public let isSupported: Bool
+    public let availableRawPhotoPixelFormatTypes: [UInt32]
+    public let reason: String?
+
+    public init(
+        isSupported: Bool,
+        availableRawPhotoPixelFormatTypes: [UInt32],
+        reason: String? = nil
+    ) {
+        self.isSupported = isSupported
+        self.availableRawPhotoPixelFormatTypes = availableRawPhotoPixelFormatTypes
+        self.reason = reason
+    }
+}
+
 public enum CaptureSessionError: Error, Equatable, LocalizedError {
     case cameraSwitchNotSupported
     case backendFailure(message: String)
@@ -43,6 +59,7 @@ public protocol CaptureSessionBackend {
     func stopRunning()
     func switchCamera() throws -> CaptureLensPosition
     func capturePhoto() async throws -> Data
+    func rawCaptureCapability() -> RawCaptureCapability
 }
 
 public protocol CaptureSessionServing {
@@ -54,6 +71,7 @@ public protocol CaptureSessionServing {
     func stop()
     func switchCamera() throws
     func capturePhoto() async throws -> Data
+    func rawCaptureCapability() -> RawCaptureCapability
     func markInterrupted(reason: String)
 }
 
@@ -188,6 +206,10 @@ public final class CaptureSessionService: CaptureSessionServing {
             throw error
         }
     }
+
+    public func rawCaptureCapability() -> RawCaptureCapability {
+        backend.rawCaptureCapability()
+    }
 }
 
 public final class SimulatedCaptureSessionBackend: CaptureSessionBackend {
@@ -220,6 +242,14 @@ public final class SimulatedCaptureSessionBackend: CaptureSessionBackend {
     public func capturePhoto() async throws -> Data {
         // Small synthetic JPEG marker payload to keep simulator/test flows deterministic.
         Data([0xFF, 0xD8, 0xFF, 0xD9])
+    }
+
+    public func rawCaptureCapability() -> RawCaptureCapability {
+        RawCaptureCapability(
+            isSupported: false,
+            availableRawPhotoPixelFormatTypes: [],
+            reason: "RAW photo capture is unavailable in the simulated backend."
+        )
     }
 }
 
@@ -307,6 +337,33 @@ public final class AVCaptureSessionBackend: CaptureSessionBackend {
         }
         #else
         throw CaptureSessionError.backendFailure(message: "Photo capture is unavailable on this platform.")
+        #endif
+    }
+
+    public func rawCaptureCapability() -> RawCaptureCapability {
+        #if canImport(AVFoundation)
+        do {
+            try configureSessionIfNeeded(for: activeLensPosition)
+        } catch {
+            return RawCaptureCapability(
+                isSupported: false,
+                availableRawPhotoPixelFormatTypes: [],
+                reason: "RAW capability check failed: \(String(describing: error))"
+            )
+        }
+
+        let formatTypes: [UInt32] = photoOutput.availableRawPhotoPixelFormatTypes.map { UInt32($0) }
+        return RawCaptureCapability(
+            isSupported: !formatTypes.isEmpty,
+            availableRawPhotoPixelFormatTypes: formatTypes,
+            reason: formatTypes.isEmpty ? "No RAW pixel formats are available for the active camera configuration." : nil
+        )
+        #else
+        return RawCaptureCapability(
+            isSupported: false,
+            availableRawPhotoPixelFormatTypes: [],
+            reason: "RAW photo capture is unavailable on this platform."
+        )
         #endif
     }
 

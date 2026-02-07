@@ -109,6 +109,17 @@ public final class CaptureAppModel {
         try await sessionService.capturePhoto()
     }
 
+    public func currentLensPosition() -> CaptureLensPosition? {
+        guard case let .running(position) = sessionService.state else {
+            return nil
+        }
+        return position
+    }
+
+    public func rawCaptureCapability() -> RawCaptureCapability {
+        sessionService.rawCaptureCapability()
+    }
+
     #if canImport(AVFoundation)
     public var previewSession: AVCaptureSession? {
         sessionService.previewSession
@@ -117,6 +128,36 @@ public final class CaptureAppModel {
 
     public func saveArtifact(_ artifact: CaptureArtifact) async {
         await metadataStore.save(artifact)
+    }
+
+    public func persistPhotoLibraryCapture(
+        localIdentifier: String,
+        capturedAt: Date,
+        lensPosition: CaptureLensPosition?,
+        byteCount: Int
+    ) async {
+        let metadata: [String: String] = [
+            "photo_library_local_identifier": localIdentifier,
+            "captured_at": capturedAt.ISO8601Format(),
+            "lens_position": lensPosition?.rawValue ?? "unknown",
+            "byte_count": String(byteCount),
+        ]
+
+        let artifact = CaptureArtifact(
+            createdAt: capturedAt,
+            primaryURL: URL(string: "photos://asset")!,
+            photoLibraryLocalIdentifier: localIdentifier,
+            metadata: metadata
+        )
+        await metadataStore.save(artifact)
+
+        logger?.log(
+            CaptureEvent(
+                category: .storage,
+                action: "capture_metadata_saved",
+                payload: metadata
+            )
+        )
     }
 }
 

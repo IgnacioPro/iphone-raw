@@ -42,6 +42,19 @@ struct ContentView: View {
                 .padding(.horizontal, 20)
             }
         }
+        .overlay(alignment: .top) {
+            if let saveToast = bootstrap.saveToast {
+                Text(saveToast.message)
+                    .font(.footnote.weight(.semibold))
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 9)
+                    .background(.black.opacity(0.75), in: Capsule())
+                    .padding(.top, 60)
+                    .transition(.move(edge: .top).combined(with: .opacity))
+            }
+        }
+        .animation(.easeInOut(duration: 0.2), value: bootstrap.saveToast)
         .safeAreaInset(edge: .top) {
             if case .ready = bootstrap.state {
                 HStack {
@@ -85,10 +98,14 @@ struct ContentView: View {
                             .foregroundStyle(.secondary)
                     }
 
-                    if let lastSaveStatusMessage = bootstrap.lastSaveStatusMessage {
-                        Text(lastSaveStatusMessage)
+                    Text(rawCapabilityHeadline)
+                        .font(.footnote.weight(.semibold))
+                        .foregroundStyle(bootstrap.rawCaptureCapability.isSupported ? .green : .yellow)
+
+                    if let rawCapabilityReason = rawCapabilityReason {
+                        Text(rawCapabilityReason)
                             .font(.footnote)
-                            .foregroundStyle(.green)
+                            .foregroundStyle(.secondary)
                             .multilineTextAlignment(.center)
                     }
 
@@ -130,6 +147,20 @@ struct ContentView: View {
 
     private func formattedByteCount(_ bytes: Int) -> String {
         ByteCountFormatter.string(fromByteCount: Int64(bytes), countStyle: .file)
+    }
+
+    private var rawCapabilityHeadline: String {
+        let formatCount = bootstrap.rawCaptureCapability.availableRawPhotoPixelFormatTypes.count
+        if bootstrap.rawCaptureCapability.isSupported {
+            return "RAW: Supported (\(formatCount) format\(formatCount == 1 ? "" : "s"))"
+        }
+
+        return "RAW: Unavailable"
+    }
+
+    private var rawCapabilityReason: String? {
+        guard !bootstrap.rawCaptureCapability.isSupported else { return nil }
+        return bootstrap.rawCaptureCapability.reason
     }
 }
 

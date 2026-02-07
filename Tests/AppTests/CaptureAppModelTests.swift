@@ -332,6 +332,100 @@ struct CaptureAppModelTests {
         try model.resetExposureCompensation()
         #expect(model.exposureCompensation() == 0)
     }
+
+    @Test("control preset save/load persists current manual control configuration")
+    func saveAndLoadControlPreset() async throws {
+        let permissionClient = StubPermissionClient(status: .authorized, requestAccessResult: true)
+        let sessionBackend = StubCaptureBackend()
+        let sessionService = CaptureSessionService(backend: sessionBackend)
+        let gate = CameraPermissionGate(client: permissionClient)
+        let model = CaptureAppModel(
+            permissionGate: gate,
+            sessionService: sessionService,
+            metadataStore: InMemoryCaptureMetadataStore()
+        )
+
+        await model.bootstrap()
+        try model.setCustomExposure(iso: 320, shutterSeconds: 1.0 / 60.0)
+        try model.lockFocus(lensPosition: 0.77)
+        try model.lockWhiteBalance(temperatureKelvin: 5_400, tint: -12)
+        try model.setExposureCompensation(0.7)
+
+        let savedAt = Date(timeIntervalSince1970: 1_735_000_000)
+        let savedPreset = try model.saveCurrentControlPreset(for: .preset2, savedAt: savedAt)
+
+        #expect(savedPreset.savedAt == savedAt)
+        #expect(savedPreset.exposureState.mode == .custom)
+        #expect(savedPreset.exposureState.iso == 320)
+        #expect(savedPreset.exposureState.shutterSeconds == 1.0 / 60.0)
+        #expect(savedPreset.focusState.mode == .locked)
+        #expect(savedPreset.focusState.lensPosition == 0.77)
+        #expect(savedPreset.whiteBalanceState.mode == .locked)
+        #expect(savedPreset.whiteBalanceState.temperatureKelvin == 5_400)
+        #expect(savedPreset.whiteBalanceState.tint == -12)
+        #expect(savedPreset.exposureCompensation == 0.7)
+
+        let loadedPreset = try model.loadControlPreset(for: .preset2)
+        #expect(loadedPreset == savedPreset)
+        #expect(try model.availableControlPresetSlots() == Set([.preset2]))
+    }
+
+    @Test("applyControlPreset restores saved control states and reports empty slots")
+    func applyControlPreset() async throws {
+        let permissionClient = StubPermissionClient(status: .authorized, requestAccessResult: true)
+        let sessionBackend = StubCaptureBackend()
+        let sessionService = CaptureSessionService(backend: sessionBackend)
+        let gate = CameraPermissionGate(client: permissionClient)
+        let model = CaptureAppModel(
+            permissionGate: gate,
+            sessionService: sessionService,
+            metadataStore: InMemoryCaptureMetadataStore()
+        )
+
+        await model.bootstrap()
+        try model.setCustomExposure(iso: 640, shutterSeconds: 1.0 / 30.0)
+        try model.lockFocus(lensPosition: 0.66)
+        try model.lockWhiteBalance(temperatureKelvin: 5_800, tint: 6)
+        try model.setExposureCompensation(-0.9)
+        try model.saveCurrentControlPreset(
+            for: .preset1,
+            savedAt: Date(timeIntervalSince1970: 1_735_000_001)
+        )
+
+        try model.setExposureAuto()
+        try model.setFocusAuto()
+        try model.setWhiteBalanceAuto()
+        try model.resetExposureCompensation()
+
+        #expect(model.exposureState() == .auto)
+        #expect(model.focusState() == .auto)
+        #expect(model.whiteBalanceState() == .auto)
+        #expect(model.exposureCompensation() == 0)
+
+        let appliedPreset = try model.applyControlPreset(for: .preset1)
+        #expect(appliedPreset != nil)
+        #expect(
+            model.exposureState() ==
+            .custom(
+                ExposureValues(
+                    iso: 640,
+                    shutterSeconds: 1.0 / 30.0
+                )
+            )
+        )
+        #expect(model.focusState() == .locked(lensPosition: 0.66))
+        #expect(
+            model.whiteBalanceState() ==
+            .locked(
+                WhiteBalanceValues(
+                    temperatureKelvin: 5_800,
+                    tint: 6
+                )
+            )
+        )
+        #expect(model.exposureCompensation() == -0.9)
+        #expect(try model.applyControlPreset(for: .preset3) == nil)
+    }
 }
 
 private final class StubPermissionClient: CameraPermissionClient {

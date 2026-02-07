@@ -18,6 +18,7 @@ public final class CaptureAppModel {
     private let sessionService: CaptureSessionServing
     private let logger: CaptureEventLogging?
     private let metadataStore: CaptureMetadataStoring
+    private let presetStore: CapturePresetStoring
 
     public private(set) var bootState: AppBootState = .idle
 
@@ -25,11 +26,13 @@ public final class CaptureAppModel {
         permissionGate: CameraPermissionGate,
         sessionService: CaptureSessionServing,
         metadataStore: CaptureMetadataStoring,
+        presetStore: CapturePresetStoring = InMemoryCapturePresetStore(),
         logger: CaptureEventLogging? = nil
     ) {
         self.permissionGate = permissionGate
         self.sessionService = sessionService
         self.metadataStore = metadataStore
+        self.presetStore = presetStore
         self.logger = logger
     }
 
@@ -160,6 +163,49 @@ public final class CaptureAppModel {
         try sessionService.resetExposureCompensation()
     }
 
+    @discardableResult
+    public func saveCurrentControlPreset(
+        for slot: CapturePresetSlot,
+        savedAt: Date = Date()
+    ) throws -> CaptureControlPreset {
+        let preset = CaptureControlPreset(
+            exposureState: CapturePresetExposureState(sessionService.exposureState),
+            focusState: CapturePresetFocusState(sessionService.focusState),
+            whiteBalanceState: CapturePresetWhiteBalanceState(sessionService.whiteBalanceState),
+            exposureCompensation: sessionService.exposureCompensation,
+            savedAt: savedAt
+        )
+        try presetStore.save(preset, for: slot)
+        logger?.log(
+            CaptureEvent(
+                category: .capture,
+                action: "control_preset_saved",
+                payload: [
+                    "slot": slot.rawValue,
+                    "saved_at": savedAt.ISO8601Format(),
+                ]
+            )
+        )
+        return preset
+    }
+
+    public func loadControlPreset(for slot: CapturePresetSlot) throws -> CaptureControlPreset? {
+        try presetStore.load(for: slot)
+    }
+
+    public func availableControlPresetSlots() throws -> Set<CapturePresetSlot> {
+        try presetStore.availableSlots()
+    }
+
+    @discardableResult
+    public func applyControlPreset(for slot: CapturePresetSlot) throws -> CaptureControlPreset? {
+        guard let preset = try presetStore.load(for: slot) else {
+            return nil
+        }
+        try applyControlPreset(preset, slot: slot)
+        return preset
+    }
+
     public func focusState() -> FocusControlState {
         sessionService.focusState
     }
@@ -279,6 +325,50 @@ public final class CaptureAppModel {
         if let whiteBalanceTint = captureMetadata.whiteBalanceTint {
             metadata["\(prefix)white_balance_tint"] = String(whiteBalanceTint)
         }
+    }
+
+    private func applyControlPreset(
+        _ preset: CaptureControlPreset,
+        slot: CapturePresetSlot
+    ) throws {
+        switch preset.exposureState.resolvedCameraState() {
+        case .auto:
+            try setExposureAuto()
+        case let .locked(values):
+            try lockExposure(iso: values.iso, shutterSeconds: values.shutterSeconds)
+        case let .custom(values):
+            try setCustomExposure(iso: values.iso, shutterSeconds: values.shutterSeconds)
+        }
+
+        switch preset.focusState.resolvedCameraState() {
+        case .auto:
+            try setFocusAuto()
+        case let .locked(lensPosition):
+            try lockFocus(lensPosition: lensPosition)
+        }
+
+        switch preset.whiteBalanceState.resolvedCameraState() {
+        case .auto:
+            try setWhiteBalanceAuto()
+        case let .locked(values):
+            try lockWhiteBalance(
+                temperatureKelvin: values.temperatureKelvin,
+                tint: values.tint
+            )
+        }
+
+        try setExposureCompensation(preset.exposureCompensation)
+
+        logger?.log(
+            CaptureEvent(
+                category: .capture,
+                action: "control_preset_applied",
+                payload: [
+                    "slot": slot.rawValue,
+                    "saved_at": preset.savedAt.ISO8601Format(),
+                ]
+            )
+        )
     }
 }
 

@@ -5,6 +5,7 @@ import Storage
 public struct AppCompositionRoot {
     public let logger: CaptureEventLogging
     public let metadataStore: CaptureMetadataStoring
+    public let presetStore: CapturePresetStoring
     public let sessionService: CaptureSessionServing
     public let permissionGate: CameraPermissionGate
 
@@ -12,6 +13,7 @@ public struct AppCompositionRoot {
         let logger = StructuredCaptureLogger()
         self.logger = logger
         self.metadataStore = InMemoryCaptureMetadataStore()
+        self.presetStore = UserDefaultsCapturePresetStore()
         self.sessionService = CaptureSessionService(
             backend: AVCaptureSessionBackend(),
             logger: logger
@@ -27,6 +29,7 @@ public struct AppCompositionRoot {
             permissionGate: permissionGate,
             sessionService: sessionService,
             metadataStore: metadataStore,
+            presetStore: presetStore,
             logger: logger
         )
     }

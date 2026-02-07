@@ -63,6 +63,9 @@ final class BootstrapViewModel: ObservableObject {
     @Published var selectedFocusLensPosition: Double = 0.5
     @Published var selectedWhiteBalanceTemperatureKelvin: Double = 5_000
     @Published var selectedWhiteBalanceTint: Double = 0
+    @Published var selectedPresetSlot: CapturePresetSlot = .preset1
+    @Published private(set) var savedPresetSlots: Set<CapturePresetSlot> = []
+    @Published private(set) var selectedPresetSavedAt: Date?
     @Published private(set) var rawCaptureCapability = RawCaptureCapability(
         isSupported: false,
         availableRawPhotoPixelFormatTypes: [],
@@ -94,6 +97,7 @@ final class BootstrapViewModel: ObservableObject {
     ]
     static let manualWhiteBalanceTemperatureRange: ClosedRange<Double> = 2_000...10_000
     static let manualWhiteBalanceTintRange: ClosedRange<Double> = -150...150
+    static let presetSlots: [CapturePresetSlot] = CapturePresetSlot.allCases
 
     init(
         model: CaptureAppModel = AppCompositionRoot().makeAppModel(),
@@ -123,6 +127,7 @@ final class BootstrapViewModel: ObservableObject {
         refreshFocusState()
         refreshWhiteBalanceState()
         refreshStoragePressureWarning()
+        refreshPresetState()
         configureSessionObserversIfNeeded()
         #endif
     }
@@ -142,6 +147,8 @@ final class BootstrapViewModel: ObservableObject {
         whiteBalanceState = .auto
         selectedWhiteBalanceTemperatureKelvin = 5_000
         selectedWhiteBalanceTint = 0
+        savedPresetSlots = []
+        selectedPresetSavedAt = nil
         storagePressureWarning = nil
         removeSessionObservers()
     }
@@ -155,6 +162,7 @@ final class BootstrapViewModel: ObservableObject {
         refreshFocusState()
         refreshWhiteBalanceState()
         refreshStoragePressureWarning()
+        refreshPresetState()
         configureSessionObserversIfNeeded()
     }
 
@@ -373,6 +381,49 @@ final class BootstrapViewModel: ObservableObject {
         }
     }
 
+    func savePresetSelection() {
+        guard case .ready = state else { return }
+        do {
+            let preset = try model.saveCurrentControlPreset(for: selectedPresetSlot)
+            savedPresetSlots.insert(selectedPresetSlot)
+            selectedPresetSavedAt = preset.savedAt
+            lastCaptureError = nil
+        } catch {
+            lastCaptureError = captureErrorMessage(from: error)
+        }
+    }
+
+    func applyPresetSelection() {
+        guard case .ready = state else { return }
+        do {
+            guard let preset = try model.applyControlPreset(for: selectedPresetSlot) else {
+                selectedPresetSavedAt = nil
+                lastCaptureError = "\(selectedPresetSlot.displayName) has no saved controls yet."
+                return
+            }
+            refreshExposureState()
+            refreshExposureCompensation()
+            refreshFocusState()
+            refreshWhiteBalanceState()
+            savedPresetSlots.insert(selectedPresetSlot)
+            selectedPresetSavedAt = preset.savedAt
+            lastCaptureError = nil
+        } catch {
+            lastCaptureError = captureErrorMessage(from: error)
+        }
+    }
+
+    func refreshSelectedPresetSlot() {
+        do {
+            selectedPresetSavedAt = try model.loadControlPreset(for: selectedPresetSlot)?.savedAt
+        } catch {
+            selectedPresetSavedAt = nil
+            if case .ready = state {
+                lastCaptureError = captureErrorMessage(from: error)
+            }
+        }
+    }
+
     #if canImport(AVFoundation)
     var previewSession: AVCaptureSession? {
         model.previewSession
@@ -393,6 +444,7 @@ final class BootstrapViewModel: ObservableObject {
         refreshFocusState()
         refreshWhiteBalanceState()
         refreshStoragePressureWarning()
+        refreshPresetState()
         configureSessionObserversIfNeeded()
 
         if case .ready = state {
@@ -576,6 +628,19 @@ final class BootstrapViewModel: ObservableObject {
         }
 
         storagePressureWarning = nil
+    }
+
+    private func refreshPresetState() {
+        do {
+            savedPresetSlots = try model.availableControlPresetSlots()
+            selectedPresetSavedAt = try model.loadControlPreset(for: selectedPresetSlot)?.savedAt
+        } catch {
+            savedPresetSlots = []
+            selectedPresetSavedAt = nil
+            if case .ready = state {
+                lastCaptureError = captureErrorMessage(from: error)
+            }
+        }
     }
 
     #if canImport(AVFoundation)

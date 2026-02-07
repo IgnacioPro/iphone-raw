@@ -11,7 +11,7 @@ Planning horizon: 2026-02-09 through 2026-06-05
 | --- | --- | --- |
 | M0 Foundation | Complete | `FND-001` to `FND-005` are implemented and covered by package tests and CI workflow. |
 | M1 Camera MVP | Complete | `CAM-001` through `CAM-006` are implemented; interruption recovery and retry UX were validated on device. |
-| M2 Manual Controls | In progress | `MAN-001` through `MAN-005` are implemented in code; `MAN-002` through `MAN-004` are accepted on device, and `MAN-005` is pending on-device validation. |
+| M2 Manual Controls | Complete | `MAN-001` through `MAN-006` are implemented in code and accepted on device. |
 | M3 True RAW | Complete (ahead of schedule) | `RAW-001` to `RAW-006` and `RAW-008` are complete with user-validated on-device behavior. |
 | M4 to M7 | Not started | No changes yet in Pro UX, render pipeline, and release workstreams. |
 
@@ -34,7 +34,9 @@ Planning horizon: 2026-02-09 through 2026-06-05
 | MAN-002 | Done (accepted) | Manual ISO/shutter controls are wired from UI to backend in `/Users/ignacio/Code/photodew/ios/PhotodewApp/ContentView.swift`, `/Users/ignacio/Code/photodew/ios/PhotodewApp/PhotodewIOSApp.swift`, and `/Users/ignacio/Code/photodew/Sources/CameraKit/CaptureSessionService.swift`; metadata assertions are covered in `/Users/ignacio/Code/photodew/Tests/CameraKitTests/CaptureSessionServiceTests.swift`; on-device validation is documented in `/Users/ignacio/Code/photodew/docs/validation/man-002-manual-iso-shutter-validation.md`. | None |
 | MAN-003 | Done (accepted) | Manual focus lock state machine and backend apply path are implemented in `/Users/ignacio/Code/photodew/Sources/CameraKit/FocusStateMachine.swift` and `/Users/ignacio/Code/photodew/Sources/CameraKit/CaptureSessionService.swift`; iOS controls are in `/Users/ignacio/Code/photodew/ios/PhotodewApp/ContentView.swift`; deterministic transition coverage is in `/Users/ignacio/Code/photodew/Tests/CameraKitTests/FocusStateMachineTests.swift`. | None |
 | MAN-004 | Done (accepted) | White balance temperature/tint state machine (`/Users/ignacio/Code/photodew/Sources/CameraKit/WhiteBalanceStateMachine.swift`), backend apply/reset in `/Users/ignacio/Code/photodew/Sources/CameraKit/CaptureSessionService.swift`, app model passthrough in `/Users/ignacio/Code/photodew/Sources/App/CaptureAppModel.swift`, and iOS controls in `/Users/ignacio/Code/photodew/ios/PhotodewApp/ContentView.swift` are implemented with tests in `/Users/ignacio/Code/photodew/Tests/CameraKitTests/CaptureSessionServiceTests.swift` and `/Users/ignacio/Code/photodew/Tests/CameraKitTests/WhiteBalanceStateMachineTests.swift`; user validated on device. | None |
-| MAN-005 | In progress | EV compensation is implemented via backend/service API (`/Users/ignacio/Code/photodew/Sources/CameraKit/CaptureSessionService.swift`), app model passthrough (`/Users/ignacio/Code/photodew/Sources/App/CaptureAppModel.swift`), and iOS slider/actions (`/Users/ignacio/Code/photodew/ios/PhotodewApp/PhotodewIOSApp.swift`, `/Users/ignacio/Code/photodew/ios/PhotodewApp/ContentView.swift`) with coverage in `/Users/ignacio/Code/photodew/Tests/CameraKitTests/CaptureSessionServiceTests.swift` and `/Users/ignacio/Code/photodew/Tests/AppTests/CaptureAppModelTests.swift`. | Run device checklist in `/Users/ignacio/Code/photodew/docs/validation/man-005-ev-compensation-validation.md`. |
+| MAN-005 | Done (accepted) | EV compensation is implemented via backend/service API (`/Users/ignacio/Code/photodew/Sources/CameraKit/CaptureSessionService.swift`), app model passthrough (`/Users/ignacio/Code/photodew/Sources/App/CaptureAppModel.swift`), and iOS slider/actions (`/Users/ignacio/Code/photodew/ios/PhotodewApp/PhotodewIOSApp.swift`, `/Users/ignacio/Code/photodew/ios/PhotodewApp/ContentView.swift`) with coverage in `/Users/ignacio/Code/photodew/Tests/CameraKitTests/CaptureSessionServiceTests.swift` and `/Users/ignacio/Code/photodew/Tests/AppTests/CaptureAppModelTests.swift`; user validated on device. | None |
+| MAN-006 | Done (accepted) | Preset slot/domain persistence and default UserDefaults store are implemented in `/Users/ignacio/Code/photodew/Sources/App/CaptureControlPreset.swift`; save/apply app-model wiring is in `/Users/ignacio/Code/photodew/Sources/App/CaptureAppModel.swift`; iOS preset controls are implemented in `/Users/ignacio/Code/photodew/ios/PhotodewApp/PhotodewIOSApp.swift` and `/Users/ignacio/Code/photodew/ios/PhotodewApp/ContentView.swift`; coverage is in `/Users/ignacio/Code/photodew/Tests/AppTests/CaptureAppModelTests.swift` and `/Users/ignacio/Code/photodew/Tests/AppTests/CaptureControlPresetStoreTests.swift`; user validated on device. | None |
+| RAW-007 | Not started | Optional Apple ProRAW mode is scoped in the execution board but not implemented yet. | Define product/UX constraints and implementation slices before starting. |
 | RAW-001 | Done | RAW capability detection and gating wired from backend to UI. | None |
 | RAW-002 | Done | True RAW capture path generates DNG on supported device. | None |
 | RAW-003 | Done | RAW+processed payload capture and dual Photos save implemented. | None |
@@ -45,8 +47,8 @@ Planning horizon: 2026-02-09 through 2026-06-05
 
 ### Immediate Next Sequence
 
-1. Execute `MAN-005` EV compensation on-device checklist.
-2. Start `MAN-006` preset persistence.
+1. Start `RAW-007` optional Apple ProRAW mode scope and implementation.
+2. Draft a small RAW-007 on-device validation checklist before coding.
 
 ### Known Device Console Noise
 

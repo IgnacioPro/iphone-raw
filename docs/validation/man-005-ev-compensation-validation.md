@@ -1,7 +1,7 @@
 # MAN-005 EV Compensation Validation
 
 Last updated: 2026-02-07
-Status: Pending on-device validation
+Status: Accepted (user-validated on device on 2026-02-07)
 
 ## Goal
 
@@ -34,3 +34,7 @@ Validate that exposure compensation (EV) can be adjusted and reset from the app 
 - EV adjustments apply from the UI and visibly affect preview exposure.
 - `Reset EV` restores neutral compensation (`0.0 EV`).
 - Capture remains stable before and after EV changes and camera switching.
+
+## Validation Notes
+
+- User confirmed EV behavior worked on device and asked to continue on 2026-02-07.

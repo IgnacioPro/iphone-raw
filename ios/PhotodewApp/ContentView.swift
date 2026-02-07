@@ -264,6 +264,40 @@ struct ContentView: View {
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .disabled(bootstrap.isCapturingPhoto || bootstrap.isRecoveringSession)
 
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text("Control Presets")
+                                .font(.footnote.weight(.semibold))
+                                .foregroundStyle(.white)
+
+                            Picker("Preset Slot", selection: $bootstrap.selectedPresetSlot) {
+                                ForEach(BootstrapViewModel.presetSlots, id: \.self) { slot in
+                                    Text(slot.displayName).tag(slot)
+                                }
+                            }
+                            .pickerStyle(.segmented)
+
+                            Text(presetStatusLine)
+                                .font(.footnote)
+                                .foregroundStyle(.secondary)
+
+                            HStack(spacing: 10) {
+                                Button("Save Preset") {
+                                    bootstrap.savePresetSelection()
+                                }
+                                .buttonStyle(.bordered)
+                                .frame(maxWidth: .infinity)
+
+                                Button("Apply Preset") {
+                                    bootstrap.applyPresetSelection()
+                                }
+                                .buttonStyle(.bordered)
+                                .disabled(!bootstrap.savedPresetSlots.contains(bootstrap.selectedPresetSlot))
+                                .frame(maxWidth: .infinity)
+                            }
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .disabled(bootstrap.isCapturingPhoto || bootstrap.isRecoveringSession)
+
                         Text("Mode: \(bootstrap.isRawCaptureEnabled ? "RAW (DNG)" : "Processed")")
                             .font(.footnote)
                             .foregroundStyle(.secondary)
@@ -363,6 +397,9 @@ struct ContentView: View {
             @unknown default:
                 break
             }
+        }
+        .onChange(of: bootstrap.selectedPresetSlot) { _, _ in
+            bootstrap.refreshSelectedPresetSlot()
         }
     }
 
@@ -472,6 +509,13 @@ struct ContentView: View {
             return "+\(rounded)"
         }
         return "\(rounded)"
+    }
+
+    private var presetStatusLine: String {
+        if let savedAt = bootstrap.selectedPresetSavedAt {
+            return "\(bootstrap.selectedPresetSlot.displayName) saved \(savedAt.formatted(date: .abbreviated, time: .shortened))."
+        }
+        return "\(bootstrap.selectedPresetSlot.displayName) is empty."
     }
 }
 

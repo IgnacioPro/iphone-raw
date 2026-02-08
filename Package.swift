@@ -12,6 +12,7 @@ let package = Package(
         .library(name: "App", targets: ["App"]),
         .library(name: "CameraKit", targets: ["CameraKit"]),
         .library(name: "CaptureUI", targets: ["CaptureUI"]),
+        .library(name: "RenderKit", targets: ["RenderKit"]),
         .library(name: "Storage", targets: ["Storage"]),
     ],
     targets: [
@@ -22,9 +23,16 @@ let package = Package(
             name: "Storage"
         ),
         .target(
+            name: "RenderKit",
+            dependencies: [
+                "CameraKit",
+            ]
+        ),
+        .target(
             name: "App",
             dependencies: [
                 "CameraKit",
+                "RenderKit",
                 "Storage",
             ]
         ),
@@ -45,6 +53,10 @@ let package = Package(
                 "App",
                 "CameraKit",
             ]
+        ),
+        .testTarget(
+            name: "RenderKitTests",
+            dependencies: ["RenderKit"]
         ),
         .testTarget(
             name: "StorageTests",

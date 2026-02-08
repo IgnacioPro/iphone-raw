@@ -1,6 +1,7 @@
 import CaptureUI
 import CameraKit
 import Foundation
+import RenderKit
 import SwiftUI
 #if canImport(AVFoundation)
 import AVFoundation
@@ -91,6 +92,11 @@ struct ContentView: View {
         }
         .animation(.easeInOut(duration: 0.2), value: bootstrap.saveToast)
         .statusBarHidden(true)
+        .task {
+            if case .idle = bootstrap.state {
+                await bootstrap.start()
+            }
+        }
         .onChange(of: scenePhase) { _, newPhase in
             switch newPhase {
             case .active:
@@ -106,6 +112,33 @@ struct ContentView: View {
         .onChange(of: bootstrap.selectedPresetSlot) { _, _ in
             bootstrap.refreshSelectedPresetSlot()
         }
+        #if canImport(UIKit)
+        .fullScreenCover(isPresented: $bootstrap.isPhotoReviewPresented) {
+            if let payload = bootstrap.lastCapturedPayload,
+               let format = bootstrap.lastCaptureFormat {
+                let viewModel = PhotoReviewViewModel(
+                    payload: payload,
+                    captureFormat: format,
+                    renderer: RawRenderer(),
+                    exporter: RenderExporter()
+                )
+                PhotoReviewView(
+                    viewModel: viewModel,
+                    onDismiss: {
+                        bootstrap.isPhotoReviewPresented = false
+                    },
+                    onOpenPhotos: {
+                        if let url = URL(string: "photos-redirect://") {
+                            UIApplication.shared.open(url)
+                        }
+                    }
+                )
+                .onAppear {
+                    viewModel.startRendering()
+                }
+            }
+        }
+        #endif
     }
 
     // MARK: - Launch Surface
@@ -247,11 +280,22 @@ struct ContentView: View {
                     thumbnail: bootstrap.lastCapturedThumbnail,
                     action: {
                         hapticLight()
-                        if let url = URL(string: "photos-redirect://") {
-                            UIApplication.shared.open(url)
+                        guard bootstrap.lastCapturedPayload != nil else {
+                            // No capture yet — open Photos app as fallback
+                            if let url = URL(string: "photos-redirect://") {
+                                UIApplication.shared.open(url)
+                            }
+                            return
                         }
+                        bootstrap.isPhotoReviewPresented = true
                     }
                 )
+                .onLongPressGesture {
+                    hapticLight()
+                    if let url = URL(string: "photos-redirect://") {
+                        UIApplication.shared.open(url)
+                    }
+                }
                 #endif
             }
             .padding(.horizontal, CaptureDesignTokens.chromeInset * 2)

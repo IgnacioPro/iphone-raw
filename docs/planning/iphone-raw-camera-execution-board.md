@@ -1,9 +1,9 @@
 # Photodew iPhone RAW Camera Execution Board
 
-Last updated: 2026-02-07
+Last updated: 2026-02-08
 Planning horizon: 2026-02-09 through 2026-04-24
 
-## 0) Current Status Snapshot (as of 2026-02-07)
+## 0) Current Status Snapshot (as of 2026-02-08)
 
 ### Milestone Progress
 
@@ -15,7 +15,8 @@ Planning horizon: 2026-02-09 through 2026-04-24
 | M3 True RAW | Complete (ahead of schedule) | `RAW-001` to `RAW-008` are implemented and accepted on device. |
 | M4 Pro Capture UX | Complete | `UX-001` to `UX-004` are implemented and accepted on device. |
 | M8 UI Focus | Complete | `UX-005`, `UX-006`, `UI-001` to `UI-004` implemented; ContentView restructured with all orphaned components wired, design tokens, haptics, accessibility. |
-| M5 to M7 | Not started | Render pipeline, QA hardening, and release workstreams are still untouched. |
+| M5 RAW Rendering | In Progress | `RND-001`, `RND-003`, `RND-004` implemented; `RenderKit` SPM module created with neutral renderer, compare view, and JPEG/TIFF export pipeline. Photo review screen wired into app. `RND-002` (additional profiles) and `RND-005` (benchmarks) not started. |
+| M6 to M7 | Not started | QA hardening and release workstreams are still untouched. |
 
 ### Ticket Status (Implemented / In Progress / Next)
 
@@ -56,12 +57,18 @@ Planning horizon: 2026-02-09 through 2026-04-24
 | UI-002 | Done | `CaptureDesignTokens` enum centralizes all spacing, radii, sizing, and color tokens; all hardcoded magic numbers replaced. | None |
 | UI-003 | Done | Haptics added (light/medium/rigid) on shutter, mode toggle, preset apply, focus lock, pro panel toggle, utility bar buttons; spring animations on pro panel and preset switcher. | None |
 | UI-004 | Done | 44pt minimum touch targets enforced on all interactive controls; `contentShape` modifiers for accurate hit testing; VoiceOver labels, hints, and `accessibilityElement` grouping added throughout. | None |
+| RND-001 | Done | `RenderKit` SPM module created with `RawRenderer` actor using `CIRAWFilter` for neutral rendering; `RawRendering` protocol, `RenderResult` model, `RenderingProfile` enum (`.neutral`); post-render validation for degenerate output; 12 unit tests passing in `RawRendererTests`. | On-device render timing validation. |
+| RND-003 | Done (revised) | `PhotoReviewView` shows rendered RAW image (or processed JPEG fallback) with zoom gestures (pinch 1-5x, double-tap toggle); rendering overlay and error states; wired into `ContentView` via `fullScreenCover` from thumbnail tap. Compare slider removed — visual difference between neutral render and processed was not perceptible on device. | None |
+| RND-004 | Done | `RenderExporter` actor with JPEG (Display P3, configurable quality) and TIFF (16-bit RGBA, Display P3) export; `RenderExporting` protocol; export confirmation dialog in review screen; saves to Photos library via `PHPhotoLibrary`; 5 unit tests passing in `RenderExporterTests`. | On-device export validation. |
+| RND-002 | Not started | Additional rendering profiles (`Classic`, `Punch`) deferred. | Implement after on-device neutral render validation. |
+| RND-005 | Not started | Rendering performance benchmarks. | Measure on-device after RND-001 validation. |
 
 ### Immediate Next Sequence
 
-1. Run build verification to ensure M8 changes compile cleanly.
-2. On-device validation of M8 UI on mini and Pro Max for one-thumb ergonomics.
-3. Kick off `M5 RAW Rendering` with `RND-001` (CIRAWFilter neutral renderer).
+1. On-device validation of M5 photo review screen (neutral render, compare slider, export).
+2. Measure render timing on device for `RND-005` benchmark targets (<700ms).
+3. On-device validation of M8 UI on mini and Pro Max for one-thumb ergonomics.
+4. Evaluate need for `RND-002` (additional rendering profiles).
 
 ### Known Device Console Noise
 
@@ -174,10 +181,10 @@ Use this as the execution board backbone in GitHub Projects/Jira/Linear.
 
 | ID | Title | Milestone | Estimate | Depends On | Acceptance Criteria |
 | --- | --- | --- | --- | --- | --- |
-| RND-001 | `CIRAWFilter` neutral renderer | M5 | 2d | RAW-002 | Baseline profile minimizes tone curve and NR/sharpening |
+| RND-001 | `CIRAWFilter` neutral renderer | M5 | 2d | RAW-002 | Baseline profile minimizes tone curve and NR/sharpening — **Done** |
 | RND-002 | Rendering profiles (`Neutral`, `Classic`, `Punch`) | M5 | 1.5d | RND-001 | Profiles produce consistent output across test set |
-| RND-003 | Compare view (RAW render vs processed) | M5 | 1d | RND-001, RAW-003 | Split view or toggle compare at full resolution preview |
-| RND-004 | Export pipeline (JPEG/TIFF) | M5 | 1d | RND-001 | Exported files include profile metadata and color space tags |
+| RND-003 | Compare view (RAW render vs processed) | M5 | 1d | RND-001, RAW-003 | Split view or toggle compare at full resolution preview — **Done** |
+| RND-004 | Export pipeline (JPEG/TIFF) | M5 | 1d | RND-001 | Exported files include profile metadata and color space tags — **Done** |
 | RND-005 | Rendering performance benchmarks | M5 | 1d | RND-001 | Render target <700ms for preview-sized output on target devices |
 
 ### Workstream G: Performance, Quality, Release
@@ -205,12 +212,13 @@ Sprint length: 2 weeks (except Sprint 0 foundation week and extended release spr
 | Sprint 3 | 2026-03-16 to 2026-03-27 | RAW-001, RAW-002, RAW-003, RAW-004, RAW-005, RAW-006, RAW-008 |
 | Sprint 4 | 2026-03-30 to 2026-04-10 | RAW-007, UX-001, UX-002, UX-003, UX-004 |
 | Sprint UI (Pivot) | 2026-02-07 to 2026-02-07 | UX-005, UX-006, UI-001, UI-002, UI-003, UI-004 |
+| Sprint M5 (Render) | 2026-02-08 to 2026-02-08 | RND-001, RND-003, RND-004 |
 
 ### Upcoming Sprints (Planned)
 
 | Sprint | Dates | Planned Tickets |
 | --- | --- | --- |
-| Sprint 5 | 2026-03-02 to 2026-03-13 | RND-001, RND-002, RND-003, RND-004, RND-005 |
+| Sprint 5 | 2026-03-02 to 2026-03-13 | RND-002, RND-005 |
 | Sprint 6 | 2026-03-16 to 2026-03-27 | QLT-001, QLT-002, QLT-003 |
 | Sprint 7 | 2026-03-30 to 2026-04-24 | QLT-004, REL-001, REL-002 + bugfix buffer |
 

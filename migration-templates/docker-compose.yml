@@ -1,0 +1,132 @@
+version: '3.8'
+
+# Unified Docker Compose for all services on Ubuntu machine
+# Place this in /opt/services/docker-compose.yml
+
+services:
+  # Home Assistant
+  homeassistant:
+    container_name: homeassistant
+    image: ghcr.io/home-assistant/home-assistant:stable
+    privileged: true
+    restart: unless-stopped
+    volumes:
+      - ./home-assistant/config:/config
+      - /etc/localtime:/etc/localtime:ro
+      - /run/dbus:/run/dbus:ro
+    network_mode: host  # HA often needs host networking
+    # ports:
+    #   - "8123:8123"  # Only if not using host network
+
+  # Arr Stack Services
+  radarr:
+    container_name: radarr
+    image: lscr.io/linuxserver/radarr:latest
+    restart: unless-stopped
+    ports:
+      - "7878:7878"
+    volumes:
+      - ./arr-stack/radarr/config:/config
+      - ./shared/media:/media
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - TZ=America/New_York  # Change to your timezone
+
+  sonarr:
+    container_name: sonarr
+    image: lscr.io/linuxserver/sonarr:latest
+    restart: unless-stopped
+    ports:
+      - "8989:8989"
+    volumes:
+      - ./arr-stack/sonarr/config:/config
+      - ./shared/media:/media
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - TZ=America/New_York
+
+  lidarr:
+    container_name: lidarr
+    image: lscr.io/linuxserver/lidarr:latest
+    restart: unless-stopped
+    ports:
+      - "8686:8686"
+    volumes:
+      - ./arr-stack/lidarr/config:/config
+      - ./shared/media:/media
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - TZ=America/New_York
+
+  prowlarr:
+    container_name: prowlarr
+    image: lscr.io/linuxserver/prowlarr:latest
+    restart: unless-stopped
+    ports:
+      - "9696:9696"
+    volumes:
+      - ./arr-stack/prowlarr/config:/config
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - TZ=America/New_York
+
+  # Download client (qbittorrent example)
+  qbittorrent:
+    container_name: qbittorrent
+    image: lscr.io/linuxserver/qbittorrent:latest
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+      - "6881:6881"
+      - "6881:6881/udp"
+    volumes:
+      - ./arr-stack/qbittorrent/config:/config
+      - ./shared/downloads:/downloads
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - TZ=America/New_York
+      - WEBUI_PORT=8080
+
+  # VPN (optional but recommended for *arr stack)
+  # gluetun:
+  #   container_name: gluetun
+  #   image: qmcgaw/gluetun:latest
+  #   cap_add:
+  #     - NET_ADMIN
+  #   devices:
+  #     - /dev/net/tun:/dev/net/tun
+  #   ports:
+  #     - "8080:8080"  # Forward through VPN
+  #   volumes:
+  #     - ./gluetun/config:/gluetun
+  #   environment:
+  #     - VPN_SERVICE_PROVIDER=your_provider
+  #     - VPN_TYPE=wireguard
+  #     - WIREGUARD_PRIVATE_KEY=your_key
+  #     - WIREGUARD_ADDRESSES=your_address
+  #     - SERVER_COUNTRIES=your_country
+  #   restart: unless-stopped
+
+  # Monitoring (optional)
+  # portainer:
+  #   container_name: portainer
+  #   image: portainer/portainer-ce:latest
+  #   restart: unless-stopped
+  #   ports:
+  #     - "9000:9000"
+  #   volumes:
+  #     - /var/run/docker.sock:/var/run/docker.sock
+  #     - ./portainer/data:/data
+
+networks:
+  default:
+    name: services-network
+    driver: bridge
+
+# volumes:
+#   Define named volumes here if preferred over bind mounts

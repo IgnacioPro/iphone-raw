@@ -10,6 +10,8 @@
 		15478FC79F86D32005FBF05D /* App in Frameworks */ = {isa = PBXBuildFile; productRef = 127400FFB33FE3D71A87F0E5 /* App */; };
 		9C27D975070AA5A065DB180C /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 92AB39584EFFE8BB9E34C3AC /* ContentView.swift */; };
 		B283563E5E76B18A209080EE /* CaptureUI in Frameworks */ = {isa = PBXBuildFile; productRef = A30238471672798D5ECCD616 /* CaptureUI */; };
+		C7A1B2D3E4F5A6B7C8D9E0F1 /* RenderKit in Frameworks */ = {isa = PBXBuildFile; productRef = D8B2C3E4F5A6B7C8D9E0F1A2 /* RenderKit */; };
+		E9C3D4E5F6A7B8C9D0E1F2A3 /* PhotoReviewView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F0D4E5F6A7B8C9D0E1F2A3B4 /* PhotoReviewView.swift */; };
 		FF2039BC783EBE784FAAA4DA /* PhotodewIOSApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 66E97FFBC2CA0D6335FBDB29 /* PhotodewIOSApp.swift */; };
 /* End PBXBuildFile section */
 
@@ -18,6 +20,7 @@
 		66E97FFBC2CA0D6335FBDB29 /* PhotodewIOSApp.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = PhotodewIOSApp.swift; sourceTree = "<group>"; };
 		6E82AC1A45F1675A1B3D68F0 /* PhotodewApp.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = PhotodewApp.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		92AB39584EFFE8BB9E34C3AC /* ContentView.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
+		F0D4E5F6A7B8C9D0E1F2A3B4 /* PhotoReviewView.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = PhotoReviewView.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
@@ -31,6 +34,7 @@
 			files = (
 				15478FC79F86D32005FBF05D /* App in Frameworks */,
 				B283563E5E76B18A209080EE /* CaptureUI in Frameworks */,
+				C7A1B2D3E4F5A6B7C8D9E0F1 /* RenderKit in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -58,6 +62,7 @@
 			isa = PBXGroup;
 			children = (
 				92AB39584EFFE8BB9E34C3AC /* ContentView.swift */,
+				F0D4E5F6A7B8C9D0E1F2A3B4 /* PhotoReviewView.swift */,
 				66E97FFBC2CA0D6335FBDB29 /* PhotodewIOSApp.swift */,
 			);
 			path = PhotodewApp;
@@ -128,6 +133,7 @@
 			packageProductDependencies = (
 				127400FFB33FE3D71A87F0E5 /* App */,
 				A30238471672798D5ECCD616 /* CaptureUI */,
+				D8B2C3E4F5A6B7C8D9E0F1A2 /* RenderKit */,
 			);
 			productName = PhotodewApp;
 			productReference = 6E82AC1A45F1675A1B3D68F0 /* PhotodewApp.app */;
@@ -200,6 +206,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				9C27D975070AA5A065DB180C /* ContentView.swift in Sources */,
+				E9C3D4E5F6A7B8C9D0E1F2A3 /* PhotoReviewView.swift in Sources */,
 				FF2039BC783EBE784FAAA4DA /* PhotodewIOSApp.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
@@ -512,6 +519,11 @@
 			isa = XCSwiftPackageProductDependency;
 			package = 23764C63675E3C2BC5A6EA3E /* XCLocalSwiftPackageReference ".." */;
 			productName = CaptureUI;
+		};
+		D8B2C3E4F5A6B7C8D9E0F1A2 /* RenderKit */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 23764C63675E3C2BC5A6EA3E /* XCLocalSwiftPackageReference ".." */;
+			productName = RenderKit;
 		};
 /* End XCSwiftPackageProductDependency section */
 	};

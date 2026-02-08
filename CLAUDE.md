@@ -6,10 +6,10 @@ A native iOS RAW camera app (Swift 6.1, SwiftUI, AVFoundation) targeting iPhone 
 
 ## Architecture
 
-- **SPM modules**: `CameraKit` (camera infrastructure), `Storage` (persistence), `App` (orchestration/model), `CaptureUI` (shared SwiftUI views)
+- **SPM modules**: `CameraKit` (camera infrastructure), `Storage` (persistence), `App` (orchestration/model), `CaptureUI` (shared SwiftUI views), `RenderKit` (RAW rendering and export)
 - **iOS app target**: `ios/PhotodewApp/` (Xcode project at `ios/PhotodewApp.xcodeproj`)
 - **No third-party dependencies**. iOS 17+, Swift 6.1.
-- `ContentView.swift` is the main camera UI. `PhotodewIOSApp.swift` contains `BootstrapViewModel` (~1400 lines, `@MainActor ObservableObject`) which is the bridge between SPM modules and the SwiftUI view layer.
+- `ContentView.swift` is the main camera UI. `PhotodewIOSApp.swift` contains `BootstrapViewModel` (~1500 lines, `@MainActor ObservableObject`) which is the bridge between SPM modules and the SwiftUI view layer. `PhotoReviewView.swift` is the post-capture review screen with RAW rendering and export.
 
 ## Build
 
@@ -29,6 +29,7 @@ swift test
 | File | Role |
 |---|---|
 | `ios/PhotodewApp/ContentView.swift` | Main camera UI -- all chrome, overlays, pro controls |
+| `ios/PhotodewApp/PhotoReviewView.swift` | Post-capture review screen with RAW rendering and export |
 | `ios/PhotodewApp/PhotodewIOSApp.swift` | App entry point + BootstrapViewModel |
 | `Sources/CameraKit/CaptureSessionService.swift` | Core camera session abstraction |
 | `Sources/CameraKit/ExposureStateMachine.swift` | Exposure auto/locked/custom state machine |
@@ -36,10 +37,14 @@ swift test
 | `Sources/CameraKit/WhiteBalanceStateMachine.swift` | WB auto/locked state machine |
 | `Sources/App/CaptureAppModel.swift` | App-level orchestration model |
 | `Sources/App/CaptureControlPreset.swift` | Preset slot persistence |
+| `Sources/RenderKit/RawRenderer.swift` | CIRAWFilter neutral RAW renderer |
+| `Sources/RenderKit/RenderExporter.swift` | JPEG/TIFF export pipeline |
+| `Sources/RenderKit/RenderingProfile.swift` | Rendering profile enum (neutral) |
+| `Sources/RenderKit/RenderResult.swift` | Render result model with timing |
 | `Sources/Storage/CaptureMetadataStore.swift` | Photo library capture metadata |
 | `docs/planning/iphone-raw-camera-execution-board.md` | Full execution board with tickets and sprints |
 
-## Milestone Status (as of 2026-02-07)
+## Milestone Status (as of 2026-02-08)
 
 | Milestone | Status |
 |---|---|
@@ -49,7 +54,8 @@ swift test
 | M3 True RAW | Complete |
 | M4 Pro Capture UX | Complete |
 | M8 UI Focus | Complete |
-| M5-M7 | Not started |
+| M5 RAW Rendering | In Progress (RND-001, RND-004 done and validated on device; RND-003 revised -- compare slider removed; RND-002, RND-005 not started) |
+| M6-M7 | Not started |
 
 ## Conventions
 
@@ -69,5 +75,6 @@ Three haptic levels are used: `hapticLight()` for toggles/navigation, `hapticMed
 
 ## Next Steps
 
-1. On-device validation of M8 UI changes (mini + Pro Max)
-2. M5 RAW Rendering: `CIRAWFilter` neutral renderer, rendering profiles, compare view, export pipeline
+1. On-device validation of M5 photo review screen (neutral render, export)
+2. On-device validation of M8 UI changes (mini + Pro Max)
+3. M5 RAW Rendering: `RND-002` (additional rendering profiles), `RND-005` (performance benchmarks)

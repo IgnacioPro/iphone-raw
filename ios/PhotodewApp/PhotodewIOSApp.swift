@@ -1,6 +1,7 @@
 import App
 import CameraKit
 import Foundation
+import RenderKit
 import SwiftUI
 #if canImport(AVFoundation)
 import AVFoundation
@@ -128,6 +129,9 @@ final class BootstrapViewModel: ObservableObject {
     #if canImport(UIKit)
     @Published private(set) var lastCapturedThumbnail: UIImage?
     #endif
+    @Published private(set) var lastCapturedPayload: CapturedPhotoPayload?
+    @Published private(set) var lastCaptureFormat: CapturePhotoFormat?
+    @Published var isPhotoReviewPresented = false
     @Published private(set) var saveToast: SaveToastState?
     @Published private(set) var selectedCaptureFormat: CapturePhotoFormat = .processed
     @Published private(set) var storagePressureWarning: String?
@@ -349,6 +353,8 @@ final class BootstrapViewModel: ObservableObject {
             #if canImport(UIKit)
             updateLastCapturedThumbnail(from: capturePayload)
             #endif
+            lastCapturedPayload = capturePayload
+            lastCaptureFormat = captureFormat
             setSaveToast(.saved)
             scheduleSaveToastDismiss()
             activeCaptureID = nil
